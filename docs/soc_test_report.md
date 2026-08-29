@@ -1,0 +1,285 @@
+# PicoRV32 SoC 外设读写验证与时序分析测试报告
+
+- **测试对象**：PicoRV32 SoC（`soc_top.v`，AXI-Lite 架构）
+- **测试平台**：Verilator 5.050（`--timing`，仿真时钟 100 MHz，周期 10 ns）
+- **固件**：`fw/app`（外设函数库 `fw/lib` + 应用），riscv-none-elf-gcc 编译，1662 字（6648 字节）
+- **测试日期**：2026-08-29
+- **总体结论**：**PASS**（14/14 项外设检查全部通过，0 失败，无 CPU trap）
+
+---
+
+## 1. 系统架构与地址映射
+
+本 SoC 采用双主（PicoRV32 CPU + 外部主机下载口）AXI-Lite 互连（`axil_interconnect`，来自 Verilog-AXI 基础设施库），挂接 11 个从口：
+
+| 从口 | 基地址 | 外设 | 说明 |
+|---|---|---|---|
+| 0 | `0x00000000` | `axil_ram` | 64 KB 指令/数据 RAM |
+| 1 | `0x10000000` | `boot_ctrl` | CPU 复位控制（下载用） |
+| 2 | `0x20000000` | `irq_ctrl` | 中断控制器（16 源聚合） |
+| 3-6 | `0x30000000`+ | `i2c_master_axil` ×4 | I2C 主控制器（alexforencich） |
+| 7-8 | `0x40000000`+ | `uart_axil` ×2 | UART 串口（alexforencich） |
+| 9 | `0x50000000` | APB0：GPIO + TIMER0 | 经 `axil2apb` 桥 + `apb_interconnect` |
+| 10 | `0x60000000` | APB1：CTRL + TIMER1 | 经 `axil2apb` 桥 + `apb_interconnect` |
+
+中断映射：`[0]` UART0_RX、`[1]` UART0_TX、`[2]` UART1_RX、`[3]` UART1_TX、`[4]` TIMER0、`[5]` TIMER1、`[6]` GPIO，聚合后送入 PicoRV32 `irq[5]`。
+
+---
+
+## 2. 总体流程时间线
+
+由外部主机口完成固件下载 → 通过 `boot_ctrl` 释放 CPU 复位 → CPU 运行自测 → 写 `ctrl1=0xBEEF` 报告 PASS。
+
+| 阶段事件 | 时间 (ns) | 说明 |
+|---|---|---|
+| 系统复位释放 (`rst_n` 拉高) | ≈ 250 | 复位 25 拍后释放 |
+| 下载开始（首个主机写） | 385 | 写入 RAM |
+| 下载结束（第 1662 字） | 166,785 | 1662 字共耗时 166.4 µs |
+| `boot_ctrl.CTRL` 写 `1` | 166,805 | 请求释放 CPU 复位 |
+| `cpu_resetn` 拉高 | 166,825 | 写后 20 ns（2 拍）生效 |
+| **CPU 首次取指** | 166,885 | 复位释放后 60 ns（6 拍） |
+| 自测完成（`ctrl1=0xBEEF`） | 3,605,275 | 自测耗时 3,438,450 ns（≈3.44 ms） |
+| 仿真结束 | ≈ 3,606,000 | `$finish` |
+
+- **下载吞吐率**：6648 字节 / 166.4 µs ≈ **39.9 MB/s**，每字平均 100 ns（10 拍/字，含互连握手）。
+- 复位释放写 → `cpu_resetn` 生效仅 2 拍（`boot_ctrl` 直接 `assign cpu_resetn = ctrl[0]`）。
+- 复位释放 → 首次取指 6 拍（CPU 复位撤除后的启动周期 + RAM 读延迟）。
+
+---
+
+## 3. 外设读写验证数据
+
+### 3.1 boot_ctrl（复位控制，0x10000000）
+
+| 操作 | 地址 | 数据 | 结果 |
+|---|---|---|---|
+| 主机写 CTRL | 0x00 | 0x1 | `cpu_resetn` 拉高，CPU 启动 |
+| CPU 读 STATUS | 0x04 | bit0=1（running）、bit1=0（trap 清除） | PASS |
+
+固件检查 `BOOT_STATUS & 0x1 == 1`（复位已释放）、`BOOT_STATUS & 0x2 == 0`（无 trap）均通过。
+
+### 3.2 irq_ctrl（中断控制器，0x20000000）
+
+捕获到的 AXI-Lite 读写序列（AW/W 与 R 均为 3 拍事务）：
+
+| 时间 (ns) | 操作 | 地址 | 数据 | 含义 |
+|---|---|---|---|---|
+| 176,665 | R | IPR(0x04) | 0x00000000 | 无挂起（定时器测试前轮询） |
+| 2,291,435 | W | IER(0x00) | 0x00000000 | 关全部中断源 |
+| 2,292,285 | W | MER(0x08) | 0x00000000 | 关主中断 |
+| 2,295,075 | W | IER(0x00) | 0x00000010 | 使能 TIMER0（bit4） |
+| 2,295,925 | W | MER(0x08) | 0x00000001 | 开主中断 |
+| 2,311,075 | R | IPR | 0x00000010 | 读到 TIMER0 挂起 → ISR 响应 |
+| … | R | IPR | 0x00000010 ×15 | 定时器中断风暴 |
+| 2,622,495 | W | MER | 0 | 关闭主中断 |
+| 2,623,245 | W | IER | 0 | 关闭全部源 |
+| 2,761,455 | W | IER | 0x00000040 | 使能 GPIO（bit6） |
+| 2,762,305 | W | MER | 1 | 开主中断 |
+| 2,770,985 | R | IPR | 0x00000040 | 读到 GPIO 挂起 → ISR 响应 |
+| 2,801,195 | W | IER / MER | 0 / 0 | 收尾关闭 |
+
+**验证结论**：IER 使能位、MER 主开关、IPR 挂起读回全部正确；TIMER0 与 GPIO 中断源均被正确识别。
+
+### 3.3 GPIO（APB0，0x50000000）
+
+| 操作 | 地址 | 写数据 | 读回数据 | 结果 |
+|---|---|---|---|---|
+| 读 IN | 0x04 | - | 0x00AA | PASS（TB 驱动 0x00AA） |
+| 写 DIR | 0x08 | 0xFFFF | - | 全输出 |
+| 写 OUT | 0x00 | 0x5A5A | 0x5A5A | PASS |
+| 写 OUT | 0x00 | 0xA5A5 | 0xA5A5 | PASS |
+| 写 DIR | 0x08 | 0x0000 | - | 恢复全输入 |
+
+GPIO 输入采样、输出回读、方向控制均正确。GPIO 上升沿中断（bit0）由 TB 在 "GPIOIRQ" 标记后翻转 `gpio_in[0]` 触发，ISR 通过 IPR 识别并清除，中断触发验证通过。
+
+### 3.4 CTRL 控制寄存器（APB1，0x60000000）
+
+| 操作 | 地址 | 写数据 | 读回数据 | 结果 |
+|---|---|---|---|---|
+| 读 VERSION | 0x0C | - | 0x00000001 | 版本号正确 |
+| 写/读 REG0 | 0x00 | 0x11112222 | 0x11112222 | PASS |
+| 写/读 REG1 | 0x04 | 0x33334444 | 0x33334444 | PASS |
+| 写/读 REG2 | 0x08 | 0x55556666 | 0x55556666 | PASS |
+| 写 REG1 | 0x04 | 0x0000BEEF | - | 结果标记（PASS） |
+
+### 3.5 UART0 / UART1（0x40000000 / 0x40010000）
+
+配置：`UART_PRESCALE=2`，位时间 = 2×8 = 16 拍 = 160 ns → **波特率 6.25 Mbps**。
+
+**UART0 发送**（TB 解码还原）：
+```
+UART0 TX: Hello from PicoRV32 SoC! 0123456789 abcdef
+```
+**UART1 发送**：
+```
+UART1 TX: secondary serial port alive.
+```
+两路 TX 串行位流解码与发送内容完全一致（起始位/8 数据位/停止位，每字符 16 拍）。
+
+**UART0 接收**：固件打印 "RXREADY" 标记 → TB 监测到后发送字符 `'A'`（0x41）→ 固件 `uart_getc` 收到：
+
+```
+uart0 rx byte = 0x41 'A'     [PASS] uart0 rx
+```
+
+RX 数据正确无毛刺、无误码，验证了此前修复的 RX 位采样时序（8×prescale 位周期对齐）。
+
+### 3.6 I2C0（0x30000000，alexforencich i2c_master_axil）
+
+对挂接在总线 0 上的 7 位地址 `0x50` 的 EEPROM 从模型执行读写：
+
+| 测试 | 内容 | 返回 | 结果 |
+|---|---|---|---|
+| 写 | 字节 `{0x00, 0xAA, 0xBB, 0xCC}`（首个为内部指针） | rc=0 (I2C_OK) | PASS |
+| 写后读 | 设置指针 0x00 后连续读 4 字节 | rc=0，数据 `AA BB CC 00` | PASS |
+
+读回数据与写入数据逐字节一致，验证 START/STOP、地址+ACK、多字节连续传输协议。全测试期间总线 0 共产生 **111 次 SCL 下降沿**（含地址、数据、ACK 位），总线活动正常。
+
+### 3.7 TIMER0（APB0，0x50001000）
+
+**单次模式（one-shot）**：`RELOAD=0x3E8`（1000），使能后轮询 COUNT 寄存器，捕获到的完整计数序列：
+
+| 轮询时间 (ns) | COUNT (hex) | COUNT (dec) | 相邻递减 |
+|---|---|---|---|
+| 2,132,215 | 0x394 | 916 | - |
+| 2,133,365 | 0x321 | 801 | 115 |
+| 2,134,515 | 0x2AE | 686 | 115 |
+| 2,135,665 | 0x23B | 571 | 115 |
+| 2,136,815 | 0x1C8 | 456 | 115 |
+| 2,137,965 | 0x155 | 341 | 115 |
+| 2,139,115 | 0x0E2 | 226 | 115 |
+| 2,140,265 | 0x06F | 111 | 115 |
+| 2,141,415 | **0x000** | **0** | 到期（保持 0） |
+
+- 每两次轮询间隔 1150 ns，计数精确递减 115 → **1 计数 = 1 时钟 = 10 ns，计数精度 100%**。
+- 到期后计数保持 0 不再重装，固件轮询 `COUNT==0` 判定超时，单次模式验证通过。
+
+**自动重载 + 中断模式**：`RELOAD=0x1F4`（500）→ 理论周期 5 µs。捕获到 16 次连续中断事件（详见时序分析 4.3），ISR 每次读取 IPR、写 IACK 清标志，最终主循环检测到 `irq_timer0_fired` 并关闭定时器，`[PASS] timer0 irq`。
+
+---
+
+## 4. 时序分析
+
+### 4.1 总线事务延迟（AXI-Lite → APB 桥路径）
+
+以监视器捕获的时间戳（10 ns 分辨率）统计：
+
+| 路径 | 事务 | 请求时间 (ns) | 响应时间 (ns) | 延迟 |
+|---|---|---|---|---|
+| APB0 读（GPIO IN） | AR→RVALID | 1,147,365 | 1,147,395 | **30 ns / 3 拍** |
+| APB0 写（GPIO DIR） | AW→BVALID | 1,146,705 | 1,146,735 | **30 ns / 3 拍** |
+| APB1 读（CTRL VER） | AR→RVALID | 451,785 | 451,815 | **30 ns / 3 拍** |
+| APB1 写（CTRL REG0） | AW→BVALID | 594,455 | 594,485 | **30 ns / 3 拍** |
+| IRQ 控制寄存器 | AR→RVALID | 1,766,655 | 1,766,665 | **10 ns / 1 拍** |
+| RAM 读（取指） | AR→RVALID | — | — | 2 拍（RTL 状态机 IDLE→READ→RESP） |
+
+> APB 路径 3 拍 = 互连仲裁/路由 1 拍 + `axil2apb` 桥（SETUP 1 拍 + ACCESS 1 拍，APB 从设备 `pready=1` 单周期应答）。全部事务 `resp=OKAY`，无超时、无重试。
+
+### 4.2 CPU 启动与指令流
+
+| 指标 | 数值 |
+|---|---|
+| 复位释放写 → `cpu_resetn` 生效 | 20 ns（2 拍） |
+| `cpu_resetn` → 首次取指 | 60 ns（6 拍） |
+| 全测试 RAM 读（AR）事务数 | 30,184 |
+| 全测试 RAM 写（AW）事务数 | 4,798 |
+| RAM 事务合计 | 34,982 |
+| 互连状态机跳变次数 | 151,305 |
+
+RAM 读事务绝大部分为取指，写事务为固件数据写入；双主仲裁（CPU 取指 + 主机下载）无冲突，验证了互连扩展从口的正确性。
+
+### 4.3 中断响应时序
+
+**TIMER0 中断**（自动重载，5 µs 周期）：
+- 定时器使能（`CTRL=0x7` 写完成）于 2,297,305 ns。
+- 首次 `IRQ_OUT` 上升沿：**2,302,325 ns**（使能后 ≈5.02 µs，与 500 拍理论值吻合）。
+- 中断响应：ISR 读取 IPR（0x10）于 2,311,075 ns → **IRQ 断言到 ISR 识别源延迟 = 8,750 ns**。
+
+**GPIO 中断**：
+- TB 翻转 `gpio_in[0]` 后 `IRQ_OUT` 上升沿：2,762,325 ns。
+- ISR 读取 IPR（0x40）：2,770,995 ns → **响应延迟 = 8,670 ns**。
+
+> 该延迟包含：PicoRV32 中断进入（`PROGADDR_IRQ=0x10` 跳转、寄存器现场保存）+ ISR 序言 + IPR AXI 读事务（3 拍）。两次测量接近一致，中断路径确定且稳定。
+
+**中断风暴说明**：TIMER0 自动重载周期 5 µs 短于 ISR 服务时间（≈10 µs，因 IPR 读 + IACK 写均走慢速 APB/AXI 路径），故出现连续 16 次 `IRQ_OUT` 脉冲（高 10 µs / 低 1 µs 交替），主循环直至检测到 `irq_timer0_fired` 标志后关闭定时器与中断。行为符合 PicoRV32 单核 + 慢速外设总线的预期特性，不影响功能正确性。
+
+### 4.4 定时器精度
+
+- 单次模式：10 µs（RELOAD=1000）精确到计数周期，轮询观测逐 10 ns 递减，**误差 = 0**。
+- 自动重载模式：5 µs（RELOAD=500），首次中断与理论值偏差 < 1%。
+
+### 4.5 I2C 总线活动
+
+- 总线 0 全测试 **111 次 SCL 下降沿**，对应：写（1 地址 + 4 数据 + ACK）+ 写读（1 地址 + 1 指针 + 4 读数据 + ACK/NACK）≈ 10 字节 × 9 SCL/字节 + 起始/停止。
+- 所有 ACK 正常，无 NACK 导致的失败，读回数据逐字节一致。
+
+---
+
+## 5. 性能汇总
+
+| 指标 | 数值 |
+|---|---|
+| 系统时钟 | 100 MHz |
+| 固件体积 | 6648 字节（1662 字） |
+| 固件下载吞吐 | ≈ 39.9 MB/s |
+| 下载阶段耗时 | 166.4 µs |
+| 全自测耗时（复位释放→结果） | 3.438 ms |
+| APB 读写事务延迟 | 30 ns（3 拍） |
+| 中断响应延迟（TIMER0 / GPIO） | 8.75 µs / 8.67 µs |
+| UART 波特率 | 6.25 Mbps（prescale=2） |
+| I2C SCL 下降沿 | 111 |
+| CPU trap | 0（全程无） |
+
+---
+
+## 6. 结论
+
+1. **功能正确性**：14/14 项外设检查全部 PASS（boot/复位控制、中断控制器、GPIO、CTRL 寄存器、UART0/1 收发、I2C0 读写、TIMER0 单次与中断），无 CPU trap，结果标记 `ctrl1=0xBEEF` 正确写入并回读。
+2. **总线协议**：双主 AXI-Lite 互连在「主机下载 + CPU 运行」场景下仲裁正确；AXI-Lite→APB 桥 3 拍完成事务，全部 `OKAY` 响应。
+3. **下载链路**：外部主机口可经互连访问 RAM 与复位控制寄存器，下载 1662 字后成功释放内核，验证了扩展从口的预期能力。
+4. **时序指标**：中断响应 ≈8.7 µs、定时器计数 100% 精确、下载吞吐 ≈40 MB/s，均在合理范围。
+
+**遗留说明**：本报告数据来自 `soc_tb.v`（`+define+ENABLE_DBG` 调试监视版）的 Verilator 仿真日志（`sim/sim_dbg3.log`），监视点包括 CPU 复位/取指、RAM 事务计数、互连状态跳变、IRQ 控制器事务、APB0/APB1 全部读写、中断边沿与 I2C SCL 活动。I2C1-3、UART1 RX、TIMER1 未在固件自测中覆盖，如需可扩展固件用例复测。
+
+---
+
+## 附录 A：固件完整运行日志
+
+```
+=== PicoRV32 SoC peripheral test ===
+ctrl.version   = 0x00000001
+  [PASS] ctrl0 rw
+  [PASS] ctrl1 rw
+  [PASS] ctrl2 rw
+  [PASS] cpu trap clear
+  [PASS] cpu running (reset released)
+  gpio_in       = 0x00aa
+  [PASS] gpio input (tb)
+  [PASS] gpio output 0x5A5A
+  [PASS] gpio output 0xA5A5
+UART0 TX: Hello from PicoRV32 SoC! 0123456789 abcdef
+UART1 TX: secondary serial port alive.
+RXREADY
+  uart0 rx byte = 0x41 'A'
+  [PASS] uart0 rx
+  [PASS] timer0 one-shot expired
+  [PASS] timer0 irq
+GPIOIRQ  [PASS] gpio irq
+  i2c write rc   = 0
+  [PASS] i2c0 write
+  i2c read rc    = 0  data = aa bb cc 00
+  [PASS] i2c0 read back
+RESULT: PASS
+=== TEST RESULT: PASS (ctrl1=0x0000beef) ===
+```
+
+## 附录 B：主机下载阶段日志
+
+```
+[host] fw.hex loaded: 1662 words (6648 bytes)
+[host] downloading word 0/1662 ... 1536/1662
+[host] downloaded 1662 words to RAM
+[host] ram[0]  = 0x0600600b
+[host] ram[1661] = 0x00000000
+[host] cpu reset released (boot_ctrl=1)
+```

@@ -1,0 +1,17 @@
+# --- firmware build artifacts ---
+fw/*.o
+fw/*.elf
+fw/*.hex
+fw/*.dis
+fw/app/*.o
+fw/lib/*.o
+
+# --- Verilator simulation ---
+sim/obj_dir/
+sim/fw.hex
+sim/*.log
+
+# --- editor / OS ---
+*.swp
+*~
+.DS_Store
