@@ -1,22 +1,23 @@
-// print.c - minimal console output on UART0 (implementation)
+// print.c - minimal console output on UART0 (interrupt-driven path)
+// The console UART (uart0_inst) is configured in IT mode by the board
+// support code; every character goes through the TX ring + TX interrupt.
 #include "print.h"
 #include "uart.h"
 #include "soc_addr.h"
 #include <stdarg.h>
 
-static uart_t console;
+extern uart_t uart0_inst;
 
 void print_init(uint16_t prescale)
 {
-    console.base = UART0_BASE;
-    uart_init(&console, prescale);
+    (void)prescale;   // uart0_inst is already configured by rt_hw_board_init()
 }
 
 void putchar_(char c)
 {
     if (c == '\n')
-        uart_putc(&console, '\r');
-    uart_putc(&console, c);
+        uart_it_putc(&uart0_inst, '\r');
+    uart_it_putc(&uart0_inst, c);
 }
 
 void puts_(const char *s)

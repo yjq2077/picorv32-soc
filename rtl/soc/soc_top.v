@@ -131,7 +131,7 @@ module soc_top #(
         .ENABLE_IRQ       (1),
         .ENABLE_IRQ_QREGS (1),
         .ENABLE_IRQ_TIMER (1),
-        .ENABLE_TRACE     (0),
+        .ENABLE_TRACE     (1),
         .REGS_INIT_ZERO   (0),
         .MASKED_IRQ       (32'h00000000),
         .LATCHED_IRQ      (32'hffffffff),

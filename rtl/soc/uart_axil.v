@@ -76,7 +76,11 @@ module uart_axil #(
     assign s_axil_rvalid  = (state == R_RESP);
     assign s_axil_rdata   = rdata;
 
-    assign int_tx = !tx_pending;
+    // int_tx: level-high only while the transmitter is actually ready to
+    // accept the next byte (s_axis_tready).  The uart core accepts a byte in
+    // one cycle, so !tx_pending would stay high for the whole byte time and
+    // hold the interrupt line up - use the core's ready signal instead.
+    assign int_tx = s_axis_tready;
     assign int_rx = rx_avail;
 
     uart #(

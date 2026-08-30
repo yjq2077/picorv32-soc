@@ -17,7 +17,7 @@ module soc_tb;
     localparam CLK_PERIOD       = 10;          // 100 MHz
     localparam UART_PRESCALE    = 2;           // must match main.c
     localparam UART_BIT_CYCLES  = UART_PRESCALE * 8;   // cycles per UART bit
-    localparam TIMEOUT_NS       = 4000000;     // global watchdog
+    localparam TIMEOUT_NS       = 120000000;   // global watchdog (extended: UART IRQ latency ~16us/char)
 
     reg clk = 0;
     always #(CLK_PERIOD/2) clk = ~clk;
@@ -63,6 +63,124 @@ module soc_tb;
     wire [15:0] gpio_out, gpio_oe;
     wire [31:0] ctrl0, ctrl1, ctrl2;
     wire        irq_out;
+
+    reg  [35:0] last_trace;
+    reg  [31:0] last_pc;
+    reg         ever_retired = 0;
+    reg  [31:0] retire_cnt   = 0;
+    reg  [31:0] quiet_cnt    = 0;   // cycles since last retired instruction
+    reg  [31:0] pc_hist[0:15];
+    integer     pc_hist_i = 0;
+    reg  [ 8:0] ram_snap[0:31];
+    integer     ram_snap_i = 0;
+    // per-cycle history of the interconnect write path to RAM (for stall debug)
+    reg  [47:0] w_hist[0:31];   // {ic_st[2:0], ram_st[2:0], awv,awr,wv,wr,bv,br,arv,arr,rv,rr, cpu_bv, awaddr[11:0]}
+    integer     w_hist_i = 0;
+    reg  [31:0] ram_b_cnt   = 0;
+    reg  [31:0] ram_wr_cnt  = 0;
+    reg  [31:0] mem_b_cnt   = 0;
+    reg  [31:0] cpu_wr_issue = 0;
+    reg  [31:0] cpu_wr_resp  = 0;
+    reg  [31:0] cpu_rd_issue = 0;
+    reg  [31:0] cpu_rd_resp  = 0;
+    // interrupt behaviour counters
+    reg         irq_out_d2 = 0;
+    reg  [31:0] irq_rise_cnt   = 0;   // rising edges of combined interrupt to CPU
+    reg  [31:0] irq_high_cyc   = 0;   // cycles irq line high
+    reg  [31:0] u0_txd_write   = 0;   // AXI writes to UART0 TXDATA
+    reg  [31:0] u0_rxd_read    = 0;   // AXI reads  of UART0 RXDATA
+    reg  [31:0] u0_tx_pend_hi  = 0;   // cycles uart0 tx_pending high
+    reg  [31:0] u0_int_tx_hi   = 0;   // cycles uart0 int_tx high
+    reg  [31:0] u0_ier_hi      = 0;   // cycles IER[1] (UART0 TX) set
+    reg  [31:0] cpu_irq_taken  = 0;   // cycles cpu reg_irq_pending set (interrupt in progress)
+    reg  [31:0] timer0_irq_hi  = 0;   // cycles timer0 irq high
+
+    always @(posedge clk) begin
+        if (dut.ram_bvalid && dut.ram_bready) ram_b_cnt <= ram_b_cnt + 1;
+        if (dut.ram_awvalid && dut.ram_awready && dut.ram_wvalid && dut.ram_wready)
+            ram_wr_cnt <= ram_wr_cnt + 1;
+        if (dut.mem_axi_bvalid && dut.mem_axi_bready) mem_b_cnt <= mem_b_cnt + 1;
+        if (dut.mem_axi_awvalid && dut.mem_axi_awready &&
+            dut.mem_axi_wvalid  && dut.mem_axi_wready)  cpu_wr_issue <= cpu_wr_issue + 1;
+        if (dut.mem_axi_arvalid && dut.mem_axi_arready) cpu_rd_issue <= cpu_rd_issue + 1;
+        if (dut.mem_axi_rvalid  && dut.mem_axi_rready)  cpu_rd_resp  <= cpu_rd_resp  + 1;
+        irq_out_d2 <= irq_out;
+        if (irq_out && !irq_out_d2) irq_rise_cnt <= irq_rise_cnt + 1;
+        if (irq_out)               irq_high_cyc <= irq_high_cyc + 1;
+        if (dut.u_uart0.s_axil_awvalid && dut.u_uart0.s_axil_awready &&
+            dut.u_uart0.s_axil_awaddr == 4'h0) u0_txd_write <= u0_txd_write + 1;
+        if (dut.u_uart0.s_axil_arvalid && dut.u_uart0.s_axil_arready &&
+            dut.u_uart0.s_axil_araddr == 4'h4) u0_rxd_read  <= u0_rxd_read + 1;
+        if (dut.u_uart0.tx_pending)  u0_tx_pend_hi <= u0_tx_pend_hi + 1;
+        if (dut.uart0_int_tx)        u0_int_tx_hi  <= u0_int_tx_hi + 1;
+        if (dut.u_irq.ier[1])        u0_ier_hi     <= u0_ier_hi + 1;
+        if (dut.cpu_inst.picorv32_core.irq_pending) cpu_irq_taken <= cpu_irq_taken + 1;
+        if (dut.timer0_irq)          timer0_irq_hi <= timer0_irq_hi + 1;
+        ram_snap[ram_snap_i] <= {dut.ram_bvalid, dut.ram_wvalid, dut.ram_awvalid,
+                                 dut.ram_wready, dut.ram_awready, dut.u_ram.state};
+        ram_snap_i <= (ram_snap_i + 1) & 31;
+        w_hist[w_hist_i] <= {dut.u_ic.state_reg, dut.u_ram.state,
+                             dut.ram_awvalid, dut.ram_awready,
+                             dut.ram_wvalid, dut.ram_wready,
+                             dut.ram_bvalid, dut.ram_bready,
+                             dut.ram_arvalid, dut.ram_arready,
+                             dut.ram_rvalid, dut.ram_rready,
+                             dut.mem_axi_bvalid, dut.ram_awaddr[11:0]};
+        w_hist_i <= (w_hist_i + 1) & 31;
+        if (dut.cpu_inst.trace_valid) begin
+            ever_retired <= 1;
+            retire_cnt   <= retire_cnt + 1;
+            quiet_cnt    <= 0;
+            last_trace   <= dut.cpu_inst.trace_data;
+            if (dut.cpu_inst.trace_data[32]) begin  // TRACE_BRANCH -> instr PC in [31:1]
+                last_pc        <= {dut.cpu_inst.trace_data[31:1], 1'b0};
+                pc_hist[pc_hist_i] <= {dut.cpu_inst.trace_data[31:1], 1'b0};
+                pc_hist_i      <= (pc_hist_i + 1) & 15;
+            end
+        end else if (ever_retired) begin
+            quiet_cnt <= quiet_cnt + 1;
+        end
+    end
+
+    // UART0 TX interrupt-flow trace (change-triggered, always on)
+    reg d_u0_ier1 = 0;
+    reg d_irq     = 0;
+    always @(posedge clk) begin
+        if (dut.u_uart0.s_axil_awvalid && dut.u_uart0.s_axil_awready &&
+            dut.u_uart0.s_axil_awaddr == 4'h0)
+            $display("[dbg] t=%0t U0 TXD write wdata=0x%08x '%c' (tx_pend=%b)",
+                     $time, dut.u_uart0.s_axil_wdata, dut.u_uart0.s_axil_wdata[7:0],
+                     dut.u_uart0.tx_pending);
+        if (dut.u_uart0.s_axil_arvalid && dut.u_uart0.s_axil_arready &&
+            dut.u_uart0.s_axil_araddr == 4'h8)
+            $display("[dbg] t=%0t U0 STATUS read (tx_pend=%b rx_avail=%b)",
+                     $time, dut.u_uart0.tx_pending, dut.u_uart0.rx_avail);
+        if (dut.u_uart0.tx_pending && dut.u_uart0.s_axis_tready)
+            $display("[dbg] t=%0t U0 TX byte accepted by uart core", $time);
+        if (dut.u_irq.ier[1] != d_u0_ier1) begin
+            $display("[dbg] t=%0t U0 IER[1] -> %b", $time, dut.u_irq.ier[1]);
+            d_u0_ier1 <= dut.u_irq.ier[1];
+        end
+        if (irq_out != d_irq) begin
+            $display("[dbg] t=%0t irq_out -> %b (int_tx=%b ier1=%b)", $time, irq_out,
+                     dut.uart0_int_tx, dut.u_irq.ier[1]);
+            d_irq <= irq_out;
+        end
+    end
+
+    // CPU state while the combined IRQ line stays asserted (why so slow?)
+    reg [31:0] irq_assert_cnt = 0;
+    always @(posedge clk) begin
+        if (irq_out) begin
+            irq_assert_cnt <= irq_assert_cnt + 1;
+            if (irq_assert_cnt == 0 || (irq_assert_cnt % 32'h1F4) == 0)  // every 500 cyc = 5us
+                $display("[dbg] t=%0t irq_hi=%0d cpu_st=0x%02x irq_mask=%08x pc=%08x",
+                         $time, irq_assert_cnt, dut.cpu_inst.picorv32_core.cpu_state,
+                         dut.cpu_inst.picorv32_core.irq_mask,
+                         dut.cpu_inst.picorv32_core.reg_pc);
+        end else
+            irq_assert_cnt <= 0;
+    end
 
     soc_top dut (
         .clk           (clk),
@@ -185,6 +303,11 @@ module soc_tb;
         nwords = 0;
         result_done = 0;
 
+        if ($test$plusargs("TRACE")) begin
+            $dumpfile("soc_tb.vcd");
+            $dumpvars(0, dut);
+        end
+
         rst_n = 0;
         repeat (25) @(posedge clk);
         rst_n = 1;
@@ -216,17 +339,69 @@ module soc_tb;
         axil_write(32'h10000000, 32'h00000001, 4'hF);
         $display("[host] cpu reset released (boot_ctrl=1)");
 
-        // wait for CPU trap or result marker
+        // wait for CPU trap or result marker (or a sustained CPU stall)
         i = 0;
-        while (!(cpu_trap || result_done) && i < (TIMEOUT_NS / CLK_PERIOD)) begin
+        while (!(cpu_trap || result_done) && i < (TIMEOUT_NS / CLK_PERIOD)
+               && quiet_cnt < 5000) begin
             @(posedge clk);
             i = i + 1;
         end
 
         if (cpu_trap)
             $display("[host] CPU trapped.");
-        if (!result_done && !cpu_trap)
-            $display("=== TEST RESULT: TIMEOUT ===");
+        if (!result_done && !cpu_trap) begin
+            $display("=== TEST RESULT: TIMEOUT (quiet_cnt=%0d) ===", quiet_cnt);
+            $display("[dbg] stall PC = 0x%08x (ever_retired=%b, retire_cnt=%0d, trace_valid=%b)",
+                     last_pc, ever_retired, retire_cnt, dut.cpu_inst.trace_valid);
+            $write("[dbg] pc_hist:");
+            for (i = 0; i < 16; i = i + 1)
+                $write(" %08x", pc_hist[i]);
+            $display("");
+            $display("[dbg] ram aw=%b/%b w=%b/%b b=%b/%b ar=%b/%b r=%b/%b state=%0d awaddr=%08x araddr=%08x",
+                     dut.ram_awvalid, dut.ram_awready, dut.ram_wvalid, dut.ram_wready,
+                     dut.ram_bvalid,  dut.ram_bready,  dut.ram_arvalid, dut.ram_arready,
+                     dut.ram_rvalid,  dut.ram_rready,  dut.u_ram.state,
+                     dut.ram_awaddr,  dut.ram_araddr);
+            $display("[dbg] mem aw=%b/%b w=%b/%b b=%b/%b ar=%b/%b r=%b/%b",
+                     dut.mem_axi_awvalid, dut.mem_axi_awready, dut.mem_axi_wvalid, dut.mem_axi_wready,
+                     dut.mem_axi_bvalid,  dut.mem_axi_bready,  dut.mem_axi_arvalid, dut.mem_axi_arready,
+                     dut.mem_axi_rvalid,  dut.mem_axi_rready);
+            $write("[dbg] ram_snap({b,w,aw,wr,ar,st}):");
+            for (i = 0; i < 32; i = i + 1)
+                $write(" %08b", ram_snap[i]);
+            $display("");
+            $write("[dbg] w_hist(ic_st|ram_st|awv/awr|wv/wr|bv/br|arv/arr|rv/rr|cpu_bv|awaddr):");
+            for (i = 0; i < 32; i = i + 1)
+                $write(" %x%x%x%x%x%x%x%x%x%x%x%x%x%03x", w_hist[i][47:45], w_hist[i][44:42],
+                       w_hist[i][41], w_hist[i][40], w_hist[i][39], w_hist[i][38],
+                       w_hist[i][37], w_hist[i][36], w_hist[i][35], w_hist[i][34],
+                       w_hist[i][33], w_hist[i][32], w_hist[i][31], w_hist[i][11:0]);
+            $display("");
+            $display("[dbg] ram writes accepted=%0d bvalid-pulses=%0d mem_bvalid-pulses=%0d",
+                     ram_wr_cnt, ram_b_cnt, mem_b_cnt);
+            $display("[dbg] cpu wr issue=%0d resp=%0d | rd issue=%0d resp=%0d",
+                     cpu_wr_issue, cpu_wr_resp, cpu_rd_issue, cpu_rd_resp);
+            $display("[dbg] irq rise=%0d high=%0d cyc cpu_irq_taken=%0d timer0_irq_hi=%0d",
+                     irq_rise_cnt, irq_high_cyc, cpu_irq_taken, timer0_irq_hi);
+            $display("[dbg] uart0 txd_write=%0d rxd_read=%0d tx_pend_hi=%0d int_tx_hi=%0d ier1_hi=%0d",
+                     u0_txd_write, u0_rxd_read, u0_tx_pend_hi, u0_int_tx_hi, u0_ier_hi);
+            $display("[dbg] ic state=%0d s_select=%0d m_select=%0d grant_valid=%b grant=%02x enc=%05b",
+                     dut.u_ic.state_reg, dut.u_ic.s_select, dut.u_ic.m_select_reg,
+                     dut.u_ic.arb_inst.grant_valid, dut.u_ic.arb_inst.grant,
+                     dut.u_ic.grant_encoded);
+            $display("[dbg] ic s: awv=%b awr=%b wv=%b wr=%b bv=%b br=%b arv=%b arr=%b rv=%b rr=%b",
+                     dut.u_ic.s_axil_awvalid[0], dut.u_ic.s_axil_awready_reg[0],
+                     dut.u_ic.s_axil_wvalid[0], dut.u_ic.s_axil_wready_reg[0],
+                     dut.u_ic.s_axil_bvalid_reg[0], dut.u_ic.s_axil_bready[0],
+                     dut.u_ic.s_axil_arvalid[0], dut.u_ic.s_axil_arready_reg[0],
+                     dut.u_ic.s_axil_rvalid_reg[0], dut.u_ic.s_axil_rready[0]);
+            $display("[dbg] ic m: awv=%b awr=%b wv=%b wr=%b bv=%b br=%b arv=%b arr=%b rv=%b rr=%b",
+                     dut.u_ic.m_axil_awvalid_reg[0], dut.u_ic.m_axil_awready[0],
+                     dut.u_ic.m_axil_wvalid_reg[0], dut.u_ic.m_axil_wready[0],
+                     dut.u_ic.m_axil_bvalid[0], dut.u_ic.m_axil_bready_reg[0],
+                     dut.u_ic.m_axil_arvalid_reg[0], dut.u_ic.m_axil_arready[0],
+                     dut.u_ic.m_axil_rvalid[0], dut.u_ic.m_axil_rready_reg[0]);
+        end
 `ifdef ENABLE_DBG
         #100;
         $display("== SUMMARY ==");
@@ -313,8 +488,20 @@ module soc_tb;
             dut.u_boot.s_axil_awaddr == 4'h0)
             boot_release_t = $time;
 
-        if (dut.cpu_inst.trap)
-            $display("[dbg] t=%0t CPU trap asserted", $time);
+        if (dut.cpu_inst.trap) begin
+            $display("[dbg] t=%0t CPU trap asserted, reg_pc=0x%08x last_pc=0x%08x retire_cnt=%0d",
+                     $time, dut.cpu_inst.picorv32_core.reg_pc, last_pc, retire_cnt);
+            $display("[dbg]   cpu_state=0x%02x next_insn_opcode=0x%08x dbg_insn_opcode=0x%08x",
+                     dut.cpu_inst.picorv32_core.cpu_state,
+                     dut.cpu_inst.picorv32_core.next_insn_opcode,
+                     dut.cpu_inst.picorv32_core.dbg_insn_opcode);
+            $display("[dbg]   ram[0x124A]=0x%08x ram[0x124B]=0x%08x ram[0x12D]=0x%08x",
+                     dut.u_ram.mem[32'h124A], dut.u_ram.mem[32'h124B], dut.u_ram.mem[32'h12D]);
+            $write("[dbg] trap pc_hist:");
+            for (i = 0; i < 16; i = i + 1)
+                $write(" %08x", pc_hist[(pc_hist_i + i) & 15]);
+            $display("");
+        end
 
         ic_state_d <= dut.u_ic.state_reg;
         if (dut.u_ic.state_reg != ic_state_d)
@@ -392,6 +579,10 @@ module soc_tb;
     always @(posedge clk) begin
         if (cpu_resetn && ctrl1 == 32'h0000BEEF && !result_done) begin
             $display("=== TEST RESULT: PASS (ctrl1=0x%08x) ===", ctrl1);
+            $display("[dbg] uart0 txd_write=%0d rxd_read=%0d tx_pend_hi=%0d int_tx_hi=%0d ier1_hi=%0d",
+                     u0_txd_write, u0_rxd_read, u0_tx_pend_hi, u0_int_tx_hi, u0_ier_hi);
+            $display("[dbg] irq rise=%0d high=%0d cyc cpu_irq_taken=%0d timer0_irq_hi=%0d",
+                     irq_rise_cnt, irq_high_cyc, cpu_irq_taken, timer0_irq_hi);
             result_done = 1;
         end else if (cpu_resetn && ctrl1 == 32'h0000DEAD && !result_done) begin
             $display("=== TEST RESULT: FAIL (ctrl1=0x%08x) ===", ctrl1);

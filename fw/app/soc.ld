@@ -19,6 +19,9 @@ SECTIONS
     *(.data .data.*)
     *(.sdata .sdata.*)
   }
+  /* gp for -msmall-data-limit accesses (start.S initialises it) */
+  . = ALIGN(16);
+  __global_pointer$ = . + 0x800;
 
   __bss_start = .;
   .bss : {

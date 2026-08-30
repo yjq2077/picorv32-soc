@@ -173,11 +173,12 @@ module picorv32 #(
 	localparam [35:0] TRACE_IRQ    = {4'b 1000, 32'b 0};
 
 	reg [63:0] count_cycle, count_instr;
-	reg [31:0] reg_pc, reg_next_pc, reg_op1, reg_op2, reg_out;
+	reg [31:0] reg_pc /*verilator public*/;
+    reg [31:0] reg_next_pc, reg_op1, reg_op2, reg_out;
 	reg [4:0] reg_sh;
 
-	reg [31:0] next_insn_opcode;
-	reg [31:0] dbg_insn_opcode;
+	reg [31:0] next_insn_opcode /*verilator public*/;
+    reg [31:0] dbg_insn_opcode /*verilator public*/;
 	reg [31:0] dbg_insn_addr;
 
 	wire dbg_mem_valid = mem_valid;
@@ -1178,7 +1179,7 @@ module picorv32 #(
 	localparam cpu_state_stmem  = 8'b00000010;
 	localparam cpu_state_ldmem  = 8'b00000001;
 
-	reg [7:0] cpu_state;
+	reg [7:0] cpu_state /*verilator public*/;
 	reg [1:0] irq_state;
 
 	`FORMAL_KEEP reg [127:0] dbg_ascii_state;

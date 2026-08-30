@@ -1,4 +1,4 @@
-// start.S - PicoRV32 SoC startup + IRQ vector
+// start.S - PicoRV32 SoC startup + IRQ vector (RT-Thread)
 // reset_vec @ 0x00000000 (PROGADDR_RESET), irq_vec @ 0x00000010 (PROGADDR_IRQ)
 #include "custom_ops.S"
 
@@ -6,10 +6,10 @@
         .global irq
         .global _start
 
-// reset_vec: unmask all IRQs (irq_mask = 0), jump to start
+// reset_vec: IRQs stay masked (reset default ~0); rt_hw_context_switch_to()
+// unmask all lines when the scheduler starts.
 _start:
 reset_vec:
-        picorv32_maskirq_insn(zero, zero)
         j start
 
 /* Interrupt handler
@@ -20,6 +20,14 @@ irq_vec:
         // save ra/sp into q2/q3, keep q0=PC q1=irq#
         picorv32_setq_insn(q2, x1)
         picorv32_setq_insn(q3, x2)
+
+        // prevent nested interrupts: remember the current irq mask, then
+        // mask every irq line (restored before retirq)
+        li    x1, -1
+        picorv32_maskirq_insn(x2, x1)     // x2 = old mask, mask = all ones
+        lui   x1, %hi(irq_saved_mask)
+        addi  x1, x1, %lo(irq_saved_mask)
+        sw    x2, 0(x1)
 
         lui x1, %hi(irq_regs)
         addi x1, x1, %lo(irq_regs)
@@ -72,6 +80,12 @@ irq_vec:
         // restore registers from regs; a0 = new regs pointer
         addi x1, a0, 0
 
+        // restore the irq mask saved on entry (x2 is scratch, reloaded below)
+        lui   x2, %hi(irq_saved_mask)
+        addi  x2, x2, %lo(irq_saved_mask)
+        lw    x2, 0(x2)
+        picorv32_maskirq_insn(zero, x2)
+
         lw x2,   0*4(x1)          // regs[0] -> q0 (PC)
         picorv32_setq_insn(q0, x2)
         lw x2,   1*4(x1)          // regs[1] -> q1 (ra)
@@ -117,6 +131,8 @@ irq_vec:
 irq_regs:
         // registers are saved here during interrupt handling (regs[0]=PC)
         .fill 32,4
+irq_saved_mask:
+        .fill 1,4
         // stack for the interrupt handler
         .fill 128,4
 irq_stack:
@@ -128,6 +144,10 @@ start:
         // stack pointer = STACKADDR (top of 64KB RAM, grows down)
         lui sp, 0x00010000>>12
         addi sp, sp, 0x00010000&0xfff
+
+        // global pointer (gp-relative small data)
+        lui gp, %hi(__global_pointer$)
+        addi gp, gp, %lo(__global_pointer$)
 
         // zero the .bss section
         lui a0, %hi(__bss_start)
@@ -144,18 +164,3 @@ start:
 
         // main returned - signal trap to end simulation
         ebreak
-
-// Helper: set CPU interrupt mask (bit n = 1 -> masked/disabled)
-//   void picorv32_irq_mask(uint32_t mask)
-        .global picorv32_irq_mask
-picorv32_irq_mask:
-        picorv32_maskirq_insn(zero, a0)
-        ret
-
-// Helper: read current CPU interrupt mask
-//   uint32_t picorv32_irq_get_mask(void)
-        .global picorv32_irq_get_mask
-picorv32_irq_get_mask:
-        addi a0, zero, 0
-        picorv32_maskirq_insn(a0, a0)
-        ret

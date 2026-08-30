@@ -4,7 +4,7 @@
 cd "$(dirname "$0")"
 DEFINE=""
 [ "$1" = "dbg" ] && DEFINE="-DENABLE_DBG"
-verilator --cc --exe --main --timing \
+verilator --cc --exe --main --timing --trace --trace-max-array 512 \
     -Wno-fatal -Wno-SELRANGE -Wno-WIDTH -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM \
     -O3 --Mdir obj_dir --build --top-module soc_tb \
     -f files_rtl.f soc_tb.v \

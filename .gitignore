@@ -5,11 +5,18 @@ fw/*.hex
 fw/*.dis
 fw/app/*.o
 fw/lib/*.o
+fw/rtos/**/*.o
 
 # --- Verilator simulation ---
 sim/obj_dir/
 sim/fw.hex
 sim/*.log
+sim/*.vcd
+
+# --- leftover debug artifacts ---
+fw/persist_test.txt
+fw/app/py_test.txt
+fw/app/sh_test.txt
 
 # --- editor / OS ---
 *.swp
