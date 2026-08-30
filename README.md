@@ -11,7 +11,9 @@
 - **64KB 程序 RAM**：AXI-Lite 接口，`axil_ram`，字节写使能支持。
 - **复位控制**：`boot_ctrl` 寄存器模块，外部主机可拉低/释放 CPU 复位以便下载固件。
 - **外设**：4× I2C、2× UART、2× AXI-Lite→APB 桥（挂 GPIO、Timer、CTRL 寄存器）、1× 中断控制器（irq_ctrl）。
-- **固件结构**：外设函数库（`fw/lib`，可独立发布）+ 应用（`fw/app`），全部外设读写自检。
+- **RT-Thread**：Nano 内核已移植（`fw/rtos`），8 个测试任务并发运行全部 PASS（信号量同步、时钟节拍、中断驱动外设）。
+- **固件结构**：外设函数库（`fw/lib`，可独立发布）+ RT-Thread（`fw/rtos`）+ 应用（`fw/app`），全部外设读写自检。
+- **中断优化**：UART 中断改为边沿触发；中断路径经"跳过无切换调度尾巴 + 精简 irq_vec 寄存器保存/恢复"两轮优化，仿真总周期下降约 9.3%、`irq_vec` 区域下降 21%。
 - **仿真**：Verilator 5.x 仿真环境，外部主机口完成 RAM 下载并释放复位，全部外设测试通过、无 CPU trap。
 
 ## 系统框图
@@ -48,7 +50,8 @@ picorv32-soc/
 ├── LICENSE.md              # 项目许可证（第三方组件保留各自许可证）
 ├── README.md
 ├── docs/
-│   └── soc_test_report.md  # 外设读写验证与时序分析测试报告
+│   ├── soc_test_report.md  # 外设读写验证与时序分析测试报告
+│   └── project_summary.md  # 完整项目工作总结（开发工具：TRAE Work + DeepSeek V4 Flash 正式版）
 ├── rtl/                    # 全部 RTL（相对路径，整目录可整体搬移）
 │   ├── pico32/             # PicoRV32 官方核（picorv32.v, ISC）
 │   ├── third_party/        # Alex Forencich 基础设施（MIT）
@@ -60,25 +63,29 @@ picorv32-soc/
 │       ├── axil_ram.v      # 64KB AXI4-Lite RAM（字节写）
 │       ├── boot_ctrl.v     # CPU 复位控制寄存器
 │       ├── irq_ctrl.v      # 中断控制器（16 源，使能/挂起/主使能）
-│       ├── uart_axil.v     # UART AXI4-Lite 封装
+│       ├── uart_axil.v     # UART AXI4-Lite 封装（TX 中断边沿触发）
 │       ├── axil2apb.v      # AXI4-Lite → APB 桥
 │       ├── apb_interconnect.v
 │       ├── apb_gpio.v      # GPIO（含中断）
 │       ├── apb_timer.v     # 定时器（含中断）
 │       └── apb_ctrl.v      # 控制/状态寄存器
 ├── sim/                    # Verilator 仿真
-│   ├── soc_tb.v            # 顶层测试台（主机下载口 + 外设行为模型）
+│   ├── soc_tb.v            # 顶层测试台（主机下载口 + 外设行为模型 + 周期记账）
 │   ├── files_rtl.f         # RTL 源清单（相对路径）
 │   ├── build_sim.sh        # 编译
 │   ├── run_sim.sh          # 运行（自动取 fw/fw.hex 下载）
 │   └── analyze_log.py      # 仿真日志解析（供测试报告使用）
-└── fw/                     # 固件：外设函数库 + 应用
+└── fw/                     # 固件：外设函数库 + RT-Thread + 应用
     ├── Makefile            # CROSS 前缀可覆盖
-    ├── app/                # 应用：start.S / main.c / irq.c / soc.ld
-    └── lib/                # 外设函数库（可独立发布）
-        ├── soc_addr.h      # 内存映射与寄存器定义
-        ├── uart.c/h  i2c.c/h  gpio.c/h  timer.c/h
-        ├── irq_ctrl.c/h    ctrl.c/h    print.c/h
+    ├── app/                # 应用：start.S（启动+irq_vec）/ main.c / irq.c / soc.ld
+    ├── lib/                # 外设函数库（可独立发布）
+    │   ├── soc_addr.h      # 内存映射与寄存器定义
+    │   ├── uart.c/h  i2c.c/h  gpio.c/h  timer.c/h
+    │   ├── irq_ctrl.c/h    ctrl.c/h    print.c/h
+    └── rtos/               # RT-Thread Nano 移植
+        ├── src/            # 内核源码（scheduler/ipc/timer/thread/...）
+        ├── libcpu/         # cpuport.c / context_gcc.S（PicoRV32 移植）
+        └── board.c/rtconfig.h
 ```
 
 ## 地址映射
@@ -120,9 +127,26 @@ cd sim && ./build_sim.sh && cd ..
 cd sim && ./run_sim.sh
 ```
 
-仿真结束会打印各外设 `[PASS]/[FAIL]` 结果，最终以 `ctrl1 == 0xBEEF`（PASS）/ `0xDEAD`（FAIL）上报看门狗。全部外设（CTRL、GPIO、UART0/1、TIMER0/1、I2C0..3、中断）通过且无 CPU trap 即为成功。
+仿真结束会打印各任务/外设 `[PASS]/[FAIL]` 结果，最终以 `ctrl1 == 0xBEEF`（PASS）/ `0xDEAD`（FAIL）上报看门狗。全部 8 个 RT-Thread 任务（ctrl / gpio / uarttx / uartrx / timer / gpioirq / i2c / report）通过且无 CPU trap 即为成功。
 
-详细的读写验证数据与总线/中断时序分析见 [docs/soc_test_report.md](docs/soc_test_report.md)。
+详细的读写验证数据、时序分析与中断优化前后对比见 [docs/soc_test_report.md](docs/soc_test_report.md)。
+
+## RT-Thread 多任务
+
+`fw/rtos` 为 RT-Thread Nano 在 PicoRV32 上的移植：
+
+- 线程帧布局 32 字：`[0]pc [1]ra [2]sp [3]gp [4..31]x4..x31`；
+- `context_gcc.S`：`rt_hw_context_switch(_to/_interrupt/_exit)` 上下文切换（切换出口显式 `maskirq zero, zero` 解除中断屏蔽）；
+- `start.S` 的 `irq_vec`（`PROGADDR_IRQ=0x10`）使用 PicoRV32 自定义 `setq/maskirq/retirq` 指令保存现场并切换中断栈；
+- 8 个测试任务通过计数信号量汇合，最低优先级 `report` 汇总上报 PASS。
+
+## 中断路径优化（阶段三）
+
+通过 `soc_tb.v` 周期记账发现 CPU 周期主要消耗在中断向量区（`irq_vec`），其中约 72% 为内存停等周期。三轮优化：
+
+1. **UART 中断边沿触发**（RTL）：`uart_axil.v` 由电平触发（`int_tx = s_axis_tready`，几乎恒高）改为 `tx_ready_d` 边沿检测 + `tx_irq_pend` 锁存，CPU 写 TXDATA 清除；固件新增 `uart_it_tx_kick()`。
+2. **跳过无切换请求的中断调度尾巴**（`irq.c`）：`rt_interrupt_leave()` 后若 `rt_thread_switch_interrupt_flag==0` 直接返回，`ctx_asw` 周期 **-138k（-27%）**。
+3. **精简 irq_vec 寄存器保存/恢复**（`start.S` + `cpuport.c`）：利用 ABI 约定，s2-s11 由合规 C ISR 调用链天然保存，向量仅存/恢复 22 个寄存器，切换时由 `rt_hw_irq_handle_switch` 从 CPU 活值补全。**总周期 -956k（-9.3%），irq_vec -946k（-21.1%）**。
 
 ## 固件库与应用的分离
 
@@ -139,3 +163,8 @@ cd sim && ./run_sim.sh
 - 本 SoC 专用 RTL 与固件：MIT，见 [LICENSE.md](LICENSE.md)。
 - [PicoRV32](https://github.com/YosysHQ/picorv32)：ISC，`rtl/pico32/COPYING`（v1.0-72-ga473fc8, 2026-07-31）。
 - [verilog-axi](https://github.com/alexforencich/verilog-axi) / [verilog-uart](https://github.com/alexforencich/verilog-uart) / [verilog-i2c](https://github.com/alexforencich/verilog-i2c)：MIT，`rtl/third_party/*/COPYING`（2025-02-27）。
+- [RT-Thread](https://github.com/RT-Thread/rt-thread)：Apache-2.0，见 `fw/rtos/LICENSE-APACHE-2.0.txt`。
+
+## 开发工具
+
+本项目通过 **TRAE Work** 远程向 7×24 运行的小主机提交任务，全部 RTL / 固件 / 仿真 / 调试由 **DeepSeek V4 Flash 正式版** 完成。完整工作过程见 [docs/project_summary.md](docs/project_summary.md)。

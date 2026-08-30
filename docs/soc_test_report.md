@@ -2,9 +2,12 @@
 
 - **测试对象**：PicoRV32 SoC（`soc_top.v`，AXI-Lite 架构）
 - **测试平台**：Verilator 5.050（`--timing`，仿真时钟 100 MHz，周期 10 ns）
-- **固件**：`fw/app`（外设函数库 `fw/lib` + 应用），riscv-none-elf-gcc 编译，1662 字（6648 字节）
-- **测试日期**：2026-08-29
-- **总体结论**：**PASS**（14/14 项外设检查全部通过，0 失败，无 CPU trap）
+- **测试日期**：2026-08-29（阶段一：裸机外设自测）/ 2026-08-30（阶段二、三：RT-Thread 移植与中断路径优化）
+- **总体结论**：**PASS**
+  - 阶段一：14/14 项外设检查全部通过，0 失败，无 CPU trap；
+  - 阶段二/三：RT-Thread 8/8 任务全部通过（`ctrl1=0x0000beef`），中断路径经三轮优化总周期下降约 9.3%。
+
+> 本文第 1-6 节为阶段一裸机外设验证与总线/中断时序分析；第 7 节起为阶段二、三（RT-Thread 移植 + 中断优化）的测试数据与性能对比。
 
 ---
 
@@ -240,6 +243,85 @@ RAM 读事务绝大部分为取指，写事务为固件数据写入；双主仲�
 4. **时序指标**：中断响应 ≈8.7 µs、定时器计数 100% 精确、下载吞吐 ≈40 MB/s，均在合理范围。
 
 **遗留说明**：本报告数据来自 `soc_tb.v`（`+define+ENABLE_DBG` 调试监视版）的 Verilator 仿真日志（`sim/sim_dbg3.log`），监视点包括 CPU 复位/取指、RAM 事务计数、互连状态跳变、IRQ 控制器事务、APB0/APB1 全部读写、中断边沿与 I2C SCL 活动。I2C1-3、UART1 RX、TIMER1 未在固件自测中覆盖，如需可扩展固件用例复测。
+
+---
+
+## 7. 阶段二：RT-Thread 移植与 8 任务自测
+
+在阶段一裸机自测全部通过后，移植 RT-Thread Nano 至 PicoRV32：
+
+- **`fw/rtos`**：内核源码（`src/`）+ `libcpu` 移植（`cpuport.c` 线程帧 32 字布局 `[0]pc [1]ra [2]sp [3]gp [4..31]x4..x31`，`context_gcc.S` 上下文切换汇编）；
+- **`start.S` `irq_vec`**：中断向量（`PROGADDR_IRQ=0x10`），使用 PicoRV32 自定义 `setq/maskirq/retirq` 指令保存现场、屏蔽嵌套中断、切中断栈；
+- **8 个测试任务**（优先级 10-17，通过计数信号量汇合，最低优先级 `report` 汇总）：
+
+| 任务 | 优先级 | 验证内容 |
+|---|---|---|
+| ctrl | 10 | 控制寄存器读写、trap 清除、复位状态 |
+| gpio | 11 | GPIO 输入/输出/方向 |
+| uarttx | 12 | 中断驱动 UART0 发送（974 字符） |
+| uartrx | 13 | 中断驱动 UART0 接收 |
+| timer | 14 | TIMER1 单次 + OS tick（mdelay 10ms） |
+| gpioirq | 15 | GPIO 上升沿中断 |
+| i2c | 16 | I2C0 EEPROM 读写 |
+| report | 17 | 信号量汇合汇总 |
+
+**结果**：8/8 任务全部 `[PASS]`，最终 `=== TEST RESULT: PASS (ctrl1=0x0000beef) ===`，全程无 CPU trap。
+
+期间修复的关键问题：
+- **启动即 trap**：反汇编固件 ELF 定位 `start.S` 启动代码问题；`soc_tb.v` 增强为 trap 时打印 16 条 PC 历史；
+- **任务切换后中断被屏蔽**：新任务以 `mask=0xFFFFFFFF` 恢复导致 UART TX 中断无法服务——在 `rt_hw_context_switch_exit` 恢复线程帧后补 `maskirq zero, zero`；
+- **I2C 无中断输出**：`i2c_master_axil.v` 无 interrupt 引脚，`task_i2c` 确认采用轮询。
+
+## 8. 阶段三：中断路径性能优化
+
+### 8.1 周期记账与瓶颈定位
+
+在 `soc_tb.v` 增加按 PC 区域的周期记账（`[dbg] cyc irq_vec / irq_fn / rt_sched / ctx_asw / tick / sem`）与内存停等统计（`mem_valid && !mem_ready`）。定位结果：CPU 周期主要消耗在**中断向量区**（`irq_vec`，0x10..0x200），其中约 **72% 为内存停等周期**（指令取指 + 现场保存/恢复的数据访问均需经 AXI-Lite 互联访问 RAM）。
+
+### 8.2 优化 1：UART 中断边沿触发（RTL）
+
+- 原实现 `int_tx = s_axis_tready` 几乎恒高 → 电平触发中断风暴；
+- `uart_axil.v` 增加 `tx_ready_d` 边沿检测与 `tx_irq_pend` 锁存，CPU 写 TXDATA 时清除；
+- 固件新增 `uart_it_tx_kick()` 在 ISR 中为下一字节重新武装；
+- **收益**：`int_tx` 高电平周期大幅下降（约 69%）。
+
+### 8.3 优化 2（方向 1）：跳过无切换请求的中断调度尾巴
+
+- `irq.c` 在 `rt_interrupt_leave()` 后判断：若 `rt_thread_switch_interrupt_flag==0`（常见无切换场景）直接返回，不再调用 `rt_hw_irq_handle_switch`；
+- **收益**（基版 → 方向 1）：`ctx_asw` 区域周期 **504,504 → 366,155（-138k，-27%）**，并消除 UART TX 字符错乱。
+
+### 8.4 优化 3（方向 2）：精简 irq_vec 寄存器保存/恢复
+
+- 基于 ABI 约定（s2-s11 由合规 C ISR 调用链天然保存），`start.S` 保存侧仅存 22 个寄存器（跳过 x18-x27）；恢复侧按切换标志分支——无切换恢复 22 个、有切换恢复 32 个；
+- `cpuport.c` 切换时用内联汇编从 CPU 活值捕获 s2-s11 写入被中断线程帧（已反汇编验证仅用 a/t 寄存器，安全）；
+- **收益**（方向 1 → 方向 2，固件行为一致、974 字符不变，可严格对比）：
+
+| 指标 | 方向 1 | 方向 2 | 变化 |
+|---|---|---|---|
+| **总周期** | 10,296,224 | 9,340,283 | **-956k（-9.3%）** |
+| **irq_vec 周期** | 4,476,667 | 3,530,240 | **-946k（-21.1%）** |
+| irq_vec 内存停等 | 3,263,806 | 2,564,226 | **-700k** |
+| 停等占比 | 72% | 72% | 持平 |
+| ctx_asw | 366,155 | 366,608 | ~不变 |
+| UART TX 字符 | 974 | 974 | 一致 |
+
+> 说明：优化效果集中在 `irq_vec`（固定 0x10..0x200 区域），`total` 与 `irq_vec`/`stall_irqvec` 为可靠对比指标；`irq_fn` 因编译后 `irq()` 地址上移、`uart_it_tx_kick` 部分落入硬编码 PC 区域，跨版本不可直接对比，未采用。
+
+### 8.5 中断计数相关指标（方向 2 最终版）
+
+```
+[dbg] uart0 txd_write=974 rxd_read=1 tx_pend_hi=974 int_tx_hi=9181495 ier1_hi=4142351
+[dbg] irq rise=1990 high=4008903 cyc cpu_irq_taken=5471129 timer0_irq_hi=170913
+[dbg] cyc total=9340283 irq_vec=3530240 irq_fn=962668 rt_sched=7146 ctx_asw=366608 tick=27076 sem=7486
+[dbg] stall total=6506143 irqvec=2564226 (irqvec stall 72%)
+=== TEST RESULT: PASS (ctrl1=0x0000beef) ===
+```
+
+## 9. 阶段二/三 结论
+
+1. RT-Thread Nano 在 PicoRV32（AXI-Lite）上稳定运行：8 任务并发、信号量同步、时钟节拍、中断驱动外设全部正确。
+2. 中断路径经三轮优化（边沿触发 → 跳过调度尾巴 → 精简向量寄存器保存），总周期下降约 9.3%、`irq_vec` 区域下降 21%，且无功能回归。
+3. 内存停等（经 AXI-Lite 互联访问 RAM）是中断向量的主要开销来源（72%），方向 2 通过减少现场保存/恢复的访存次数直接削减停等 700k 周期。
 
 ---
 
