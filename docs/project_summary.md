@@ -157,6 +157,8 @@
 ## 7. 附：git 提交历史
 
 ```
+0bc280f Compact AXI-Lite address map to 2MB (64KB per slave port) for coprocessor use
+22bb1b8 Add project docs: RT-Thread/interrupt-optimization test data and work summary
 0116381 Optimize UART/RT-Thread interrupt path: edge-trigger + latency reduction
 640ab94 Add RT-Thread port, interrupt-driven UART and peripheral test tasks
 cba4d55 Initial import: PicoRV32 SoC (AXI-Lite) with dual-master interconnect, peripherals, firmware library and Verilator testbench
