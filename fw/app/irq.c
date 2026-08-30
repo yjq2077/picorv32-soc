@@ -46,6 +46,9 @@ uint32_t *irq(uint32_t *regs, uint32_t irq_num)
 
     rt_interrupt_leave();
 
-    // perform a context switch if rt_schedule() (from the ISR) requested one
+    // perform a context switch if rt_schedule() (from the ISR) requested one;
+    // skip the epilogue call entirely in the common no-switch case
+    if (!rt_thread_switch_interrupt_flag)
+        return regs;
     return rt_hw_irq_handle_switch(regs);
 }

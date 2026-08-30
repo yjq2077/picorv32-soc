@@ -76,11 +76,14 @@ module uart_axil #(
     assign s_axil_rvalid  = (state == R_RESP);
     assign s_axil_rdata   = rdata;
 
-    // int_tx: level-high only while the transmitter is actually ready to
-    // accept the next byte (s_axis_tready).  The uart core accepts a byte in
-    // one cycle, so !tx_pending would stay high for the whole byte time and
-    // hold the interrupt line up - use the core's ready signal instead.
-    assign int_tx = s_axis_tready;
+    // int_tx: edge-triggered.  Asserted when the transmitter becomes ready
+    // for the next byte (rising edge of s_axis_tready, i.e. a byte just
+    // finished shifting out) and held until the CPU writes the next TXDATA
+    // byte.  A level based on s_axis_tready would stay high the whole time
+    // the UART sits idle and flood the CPU interrupt line.
+    reg tx_ready_d;
+    reg tx_irq_pend;
+    assign int_tx = tx_irq_pend;
     assign int_rx = rx_avail;
 
     uart #(
@@ -139,8 +142,15 @@ module uart_axil #(
             tx_pending  <= 0;
             rx_rd_pulse <= 0;
             prescale    <= 16'd0;
+            tx_ready_d  <= 1'b1;    // tready is idle-high after reset: no boot edge
+            tx_irq_pend <= 0;
         end else begin
             rx_rd_pulse <= 0;
+
+            // TX ready-edge: latch the "core can accept a byte" event
+            tx_ready_d <= s_axis_tready;
+            if (s_axis_tready && !tx_ready_d)
+                tx_irq_pend <= 1;
 
             // clear tx_pending when uart core accepted the byte
             if (tx_pending && s_axis_tready)
@@ -152,8 +162,9 @@ module uart_axil #(
                         case (s_axil_awaddr)
                             4'h0: begin // TXDATA
                                 if (s_axil_wstrb[0] && !tx_pending) begin
-                                    tx_data    <= s_axil_wdata[7:0];
-                                    tx_pending <= 1;
+                                    tx_data     <= s_axil_wdata[7:0];
+                                    tx_pending  <= 1;
+                                    tx_irq_pend <= 0;   // byte submitted: clear edge latch
                                 end
                             end
                             4'hc: if (s_axil_wstrb[0]) prescale <= s_axil_wdata[15:0];

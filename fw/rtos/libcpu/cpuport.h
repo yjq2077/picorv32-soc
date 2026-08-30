@@ -38,4 +38,7 @@
  */
 uint32_t *rt_hw_irq_handle_switch(uint32_t *regs);
 
+/* set by rt_hw_context_switch_interrupt(), consumed by the ISR epilogue */
+extern volatile rt_uint32_t rt_thread_switch_interrupt_flag;
+
 #endif /* CPUPORT_H__ */

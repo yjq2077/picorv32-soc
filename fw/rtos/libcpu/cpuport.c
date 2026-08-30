@@ -69,13 +69,26 @@ uint32_t *rt_hw_irq_handle_switch(uint32_t *regs)
 
     if (!rt_thread_switch_interrupt_flag)
         return regs;
-
-    rt_thread_switch_interrupt_flag = 0;
+    /* the flag is left set: start.S irq_vec consumes it to decide between a
+       full and a partial (no-switch) register restore */
 
     /* the interrupted sp is regs[2]; place the frame below it */
     frame = (rt_ubase_t *)((rt_ubase_t)regs[2] - 32 * REGBYTES);
     for (i = 0; i < 32; i++)
         frame[i] = regs[i];
+    /* irq_vec stores only the volatile regs + s0/s1; s2-s11 are preserved by
+       the ABI-compliant ISR chain and still live, so capture them here
+       (this function must not use s-regs - verified against the build) */
+    __asm__ volatile("addi %0, s2, 0"  : "=r"(frame[18]));
+    __asm__ volatile("addi %0, s3, 0"  : "=r"(frame[19]));
+    __asm__ volatile("addi %0, s4, 0"  : "=r"(frame[20]));
+    __asm__ volatile("addi %0, s5, 0"  : "=r"(frame[21]));
+    __asm__ volatile("addi %0, s6, 0"  : "=r"(frame[22]));
+    __asm__ volatile("addi %0, s7, 0"  : "=r"(frame[23]));
+    __asm__ volatile("addi %0, s8, 0"  : "=r"(frame[24]));
+    __asm__ volatile("addi %0, s9, 0"  : "=r"(frame[25]));
+    __asm__ volatile("addi %0, s10, 0" : "=r"(frame[26]));
+    __asm__ volatile("addi %0, s11, 0" : "=r"(frame[27]));
     *rt_interrupt_from_thread = (rt_ubase_t)frame;
 
     /* load the to-thread context into irq_regs (same frame layout) */

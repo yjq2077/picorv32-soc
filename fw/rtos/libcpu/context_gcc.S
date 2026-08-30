@@ -135,4 +135,12 @@ rt_hw_context_switch_exit:
     lw   x31, 31 * 4(sp)
     lw   t1, 0 * 4(sp)        /* t1 = resume pc (after x6 is restored) */
     lw   sp, 2 * 4(sp)        /* restore sp last */
+
+    /*
+     * The thread frame does not carry an irq mask.  rt_hw_context_switch()
+     * runs inside rt_schedule's critical section (irqs masked), so resume the
+     * new thread with every irq line enabled - the ISR path restores its own
+     * saved mask via start.S, only the task-level switch reaches this point.
+     */
+    .word 0x0600600b          /* maskirq zero, zero : unmask every irq line */
     jr   t1

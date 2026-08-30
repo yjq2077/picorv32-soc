@@ -55,6 +55,19 @@ uint32_t uart_status(const uart_t *u)
 // Interrupt-driven API (STM32-HAL style)
 // ---------------------------------------------------------------------
 
+// The TX interrupt is edge-triggered: it fires on the "core ready" edge
+// (s_axis_tready rising) and only while a transmission is in flight.  If the
+// core is idle there is no edge to wake it, so submit the first queued byte
+// directly to start the flow (one byte per call, matching the ISR model).
+static void uart_it_tx_kick(uart_t *u)
+{
+    if (!(REG32(u->base + UART_STATUS) & UART_STATUS_TX_PENDING) &&
+        u->tx_head != u->tx_tail) {
+        REG32(u->base + UART_TXDATA) = u->tx_ring[u->tx_tail];
+        u->tx_tail = (uint16_t)((u->tx_tail + 1) % u->tx_ring_size);
+    }
+}
+
 int uart_it_init(uart_t *u, uint16_t prescale,
                  uint8_t *tx_ring, uint16_t tx_ring_size,
                  uint8_t *rx_ring, uint16_t rx_ring_size,
@@ -110,8 +123,9 @@ int uart_transmit_it(uart_t *u, const uint8_t *data, uint16_t size)
     u->tx_active = 1;
     irq_global_restore(key);
 
-    // arm the TX-empty interrupt (fires immediately if the UART is idle)
+    // arm the TX-empty interrupt, then start the flow if the core is idle
     irq_enable_src(u->irq_src_tx);
+    uart_it_tx_kick(u);
     return 0;
 }
 
@@ -161,6 +175,7 @@ void uart_it_putc(uart_t *u, char c)
         u->tx_active = 1;
         irq_global_restore(key);
         irq_enable_src(u->irq_src_tx);
+        uart_it_tx_kick(u);
         return;
     }
     irq_global_restore(key);

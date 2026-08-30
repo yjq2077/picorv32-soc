@@ -38,13 +38,13 @@ irq_vec:
         sw x2,   1*4(x1)          // regs[1] = ra
         picorv32_getq_insn(x2, q3)
         sw x2,   2*4(x1)          // regs[2] = sp
-        sw x3,   3*4(x1)
-        sw x4,   4*4(x1)
+        sw x3,   3*4(x1)          // gp (never modified by the ISR chain)
+        sw x4,   4*4(x1)          // tp (unused in this build)
         sw x5,   5*4(x1)
         sw x6,   6*4(x1)
         sw x7,   7*4(x1)
-        sw x8,   8*4(x1)
-        sw x9,   9*4(x1)
+        sw x8,   8*4(x1)          // s0: irq() uses it as a local
+        sw x9,   9*4(x1)          // s1: irq() uses it as a local
         sw x10, 10*4(x1)
         sw x11, 11*4(x1)
         sw x12, 12*4(x1)
@@ -53,16 +53,9 @@ irq_vec:
         sw x15, 15*4(x1)
         sw x16, 16*4(x1)
         sw x17, 17*4(x1)
-        sw x18, 18*4(x1)
-        sw x19, 19*4(x1)
-        sw x20, 20*4(x1)
-        sw x21, 21*4(x1)
-        sw x22, 22*4(x1)
-        sw x23, 23*4(x1)
-        sw x24, 24*4(x1)
-        sw x25, 25*4(x1)
-        sw x26, 26*4(x1)
-        sw x27, 27*4(x1)
+        // x18..x27 (s2-s11) are NOT stored here: the ABI-compliant C ISR
+        // chain preserves them, so they stay live in the CPU; on a context
+        // switch rt_hw_irq_handle_switch() captures them from the live regs.
         sw x28, 28*4(x1)
         sw x29, 29*4(x1)
         sw x30, 30*4(x1)
@@ -86,11 +79,20 @@ irq_vec:
         lw    x2, 0(x2)
         picorv32_maskirq_insn(zero, x2)
 
-        lw x2,   0*4(x1)          // regs[0] -> q0 (PC)
+        // if a context switch was requested, rt_hw_irq_handle_switch() loaded
+        // the full 32-reg frame (incl. s2-s11) into irq_regs and left the
+        // flag set; restore all 32.  Otherwise restore only the registers we
+        // stored - s2-s11 are still live (preserved by the ISR chain).
+        lui   t0, %hi(rt_thread_switch_interrupt_flag)
+        addi  t0, t0, %lo(rt_thread_switch_interrupt_flag)
+        lw    t1, 0(t0)
+        beq   t1, zero, 1f
+        sw    zero, 0(t0)              // consume the switch flag
+        lw x2,   0*4(x1)               // regs[0] -> q0 (PC)
         picorv32_setq_insn(q0, x2)
-        lw x2,   1*4(x1)          // regs[1] -> q1 (ra)
+        lw x2,   1*4(x1)               // regs[1] -> q1 (ra)
         picorv32_setq_insn(q1, x2)
-        lw x2,   2*4(x1)          // regs[2] -> q2 (sp)
+        lw x2,   2*4(x1)               // regs[2] -> q2 (sp)
         picorv32_setq_insn(q2, x2)
         lw x3,   3*4(x1)
         lw x4,   4*4(x1)
@@ -121,8 +123,33 @@ irq_vec:
         lw x29, 29*4(x1)
         lw x30, 30*4(x1)
         lw x31, 31*4(x1)
-
-        picorv32_getq_insn(x1, q1)   // restore ra
+        j     2f
+1:      lw x2,   0*4(x1)               // regs[0] -> q0 (PC)
+        picorv32_setq_insn(q0, x2)
+        lw x2,   1*4(x1)               // regs[1] -> q1 (ra)
+        picorv32_setq_insn(q1, x2)
+        lw x2,   2*4(x1)               // regs[2] -> q2 (sp)
+        picorv32_setq_insn(q2, x2)
+        lw x3,   3*4(x1)
+        lw x4,   4*4(x1)
+        lw x5,   5*4(x1)
+        lw x6,   6*4(x1)
+        lw x7,   7*4(x1)
+        lw x8,   8*4(x1)
+        lw x9,   9*4(x1)
+        lw x10, 10*4(x1)
+        lw x11, 11*4(x1)
+        lw x12, 12*4(x1)
+        lw x13, 13*4(x1)
+        lw x14, 14*4(x1)
+        lw x15, 15*4(x1)
+        lw x16, 16*4(x1)
+        lw x17, 17*4(x1)
+        lw x28, 28*4(x1)
+        lw x29, 29*4(x1)
+        lw x30, 30*4(x1)
+        lw x31, 31*4(x1)
+2:      picorv32_getq_insn(x1, q1)   // restore ra
         picorv32_getq_insn(x2, q2)   // restore sp
 
         picorv32_retirq_insn()

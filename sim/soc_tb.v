@@ -94,6 +94,17 @@ module soc_tb;
     reg  [31:0] u0_ier_hi      = 0;   // cycles IER[1] (UART0 TX) set
     reg  [31:0] cpu_irq_taken  = 0;   // cycles cpu reg_irq_pending set (interrupt in progress)
     reg  [31:0] timer0_irq_hi  = 0;   // cycles timer0 irq high
+    // cycle accounting by firmware code region (fw.elf addresses)
+    reg  [31:0] total_cyc      = 0;
+    reg  [31:0] cyc_irq_vec    = 0;   // irq_vec 0x10..0x200 (32-reg save/restore)
+    reg  [31:0] cyc_irq_fn     = 0;   // irq()    0xf54..0x1068
+    reg  [31:0] cyc_rt_sched   = 0;   // rt_schedule 0x3c10..0x3d6c
+    reg  [31:0] cyc_ctx_asw    = 0;   // context_gcc.S 0x214c..0x2314
+    reg  [31:0] cyc_tick       = 0;   // rt_tick_increase 0x2354..0x23e0
+    reg  [31:0] cyc_sem        = 0;   // rt_sem_take/release 0x2658..0x284c
+    // memory-stall accounting (CPU stalled awaiting a fetch/data response)
+    reg  [31:0] stall_total  = 0;    // all cycles mem_valid && !mem_ready
+    reg  [31:0] stall_irqvec = 0;    // those while PC in irq_vec 0x10..0x200
 
     always @(posedge clk) begin
         if (dut.ram_bvalid && dut.ram_bready) ram_b_cnt <= ram_b_cnt + 1;
@@ -116,6 +127,32 @@ module soc_tb;
         if (dut.u_irq.ier[1])        u0_ier_hi     <= u0_ier_hi + 1;
         if (dut.cpu_inst.picorv32_core.irq_pending) cpu_irq_taken <= cpu_irq_taken + 1;
         if (dut.timer0_irq)          timer0_irq_hi <= timer0_irq_hi + 1;
+        total_cyc <= total_cyc + 1;
+        if (dut.cpu_inst.picorv32_core.mem_valid && !dut.cpu_inst.picorv32_core.mem_ready)
+            stall_total <= stall_total + 1;
+        if (dut.cpu_inst.picorv32_core.reg_pc[15:0] >= 16'h0010 &&
+            dut.cpu_inst.picorv32_core.reg_pc[15:0] <  16'h0200) begin
+            if (dut.cpu_inst.picorv32_core.mem_valid && !dut.cpu_inst.picorv32_core.mem_ready)
+                stall_irqvec <= stall_irqvec + 1;
+        end
+        if (dut.cpu_inst.picorv32_core.reg_pc[15:0] >= 16'h0010 &&
+            dut.cpu_inst.picorv32_core.reg_pc[15:0] <  16'h0200)
+            cyc_irq_vec  <= cyc_irq_vec  + 1;
+        else if (dut.cpu_inst.picorv32_core.reg_pc[15:0] >= 16'h0f54 &&
+                 dut.cpu_inst.picorv32_core.reg_pc[15:0] <  16'h1068)
+            cyc_irq_fn   <= cyc_irq_fn   + 1;
+        else if (dut.cpu_inst.picorv32_core.reg_pc[15:0] >= 16'h3c10 &&
+                 dut.cpu_inst.picorv32_core.reg_pc[15:0] <  16'h3d6c)
+            cyc_rt_sched <= cyc_rt_sched + 1;
+        else if (dut.cpu_inst.picorv32_core.reg_pc[15:0] >= 16'h214c &&
+                 dut.cpu_inst.picorv32_core.reg_pc[15:0] <  16'h2314)
+            cyc_ctx_asw  <= cyc_ctx_asw  + 1;
+        else if (dut.cpu_inst.picorv32_core.reg_pc[15:0] >= 16'h2354 &&
+                 dut.cpu_inst.picorv32_core.reg_pc[15:0] <  16'h23e0)
+            cyc_tick     <= cyc_tick     + 1;
+        else if (dut.cpu_inst.picorv32_core.reg_pc[15:0] >= 16'h2658 &&
+                 dut.cpu_inst.picorv32_core.reg_pc[15:0] <  16'h284c)
+            cyc_sem      <= cyc_sem      + 1;
         ram_snap[ram_snap_i] <= {dut.ram_bvalid, dut.ram_wvalid, dut.ram_awvalid,
                                  dut.ram_wready, dut.ram_awready, dut.u_ram.state};
         ram_snap_i <= (ram_snap_i + 1) & 31;
@@ -383,6 +420,8 @@ module soc_tb;
                      cpu_wr_issue, cpu_wr_resp, cpu_rd_issue, cpu_rd_resp);
             $display("[dbg] irq rise=%0d high=%0d cyc cpu_irq_taken=%0d timer0_irq_hi=%0d",
                      irq_rise_cnt, irq_high_cyc, cpu_irq_taken, timer0_irq_hi);
+            $display("[dbg] cyc total=%0d irq_vec=%0d irq_fn=%0d rt_sched=%0d ctx_asw=%0d tick=%0d sem=%0d",
+                     total_cyc, cyc_irq_vec, cyc_irq_fn, cyc_rt_sched, cyc_ctx_asw, cyc_tick, cyc_sem);
             $display("[dbg] uart0 txd_write=%0d rxd_read=%0d tx_pend_hi=%0d int_tx_hi=%0d ier1_hi=%0d",
                      u0_txd_write, u0_rxd_read, u0_tx_pend_hi, u0_int_tx_hi, u0_ier_hi);
             $display("[dbg] ic state=%0d s_select=%0d m_select=%0d grant_valid=%b grant=%02x enc=%05b",
@@ -583,6 +622,10 @@ module soc_tb;
                      u0_txd_write, u0_rxd_read, u0_tx_pend_hi, u0_int_tx_hi, u0_ier_hi);
             $display("[dbg] irq rise=%0d high=%0d cyc cpu_irq_taken=%0d timer0_irq_hi=%0d",
                      irq_rise_cnt, irq_high_cyc, cpu_irq_taken, timer0_irq_hi);
+            $display("[dbg] cyc total=%0d irq_vec=%0d irq_fn=%0d rt_sched=%0d ctx_asw=%0d tick=%0d sem=%0d",
+                     total_cyc, cyc_irq_vec, cyc_irq_fn, cyc_rt_sched, cyc_ctx_asw, cyc_tick, cyc_sem);
+            $display("[dbg] stall total=%0d irqvec=%0d (irqvec stall %0d%%)",
+                     stall_total, stall_irqvec, 100 * stall_irqvec / (cyc_irq_vec ? cyc_irq_vec : 1));
             result_done = 1;
         end else if (cpu_resetn && ctrl1 == 32'h0000DEAD && !result_done) begin
             $display("=== TEST RESULT: FAIL (ctrl1=0x%08x) ===", ctrl1);
