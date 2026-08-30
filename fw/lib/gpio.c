@@ -2,7 +2,7 @@
 #include "gpio.h"
 #include "soc_addr.h"
 
-// register offsets (base = GPIO_BASE = 0x50000000)
+// register offsets (base = GPIO_BASE = 0x00090000)
 #define OFF_OUT     0x00
 #define OFF_IN      0x04
 #define OFF_DIR     0x08

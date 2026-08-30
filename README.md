@@ -2,6 +2,17 @@
 
 基于 [PicoRV32](https://github.com/YosysHQ/picorv32)（AXI4-Lite 版本）和 [Alex Forencich](https://github.com/alexforencich) 的 AXI-Lite 基础设施搭建的轻量 RISC-V SoC。包含双主 AXI4-Lite 互联、64KB 程序 RAM、UART / I2C / GPIO / Timer 外设和中断控制器，可在 Verilator 下完整仿真验证。
 
+## 应用场合
+
+本 SoC 采用 **2MB 以内的紧凑地址编址**（每个 AXI-Lite 从口仅占 64KB，便于集成进其他芯片内部总线），可作为大型逻辑芯片（如智能网卡）内部的**可编程协处理器**：外部主控通过 AXI-Lite 下载固件、控制复位并随时升级，运行需要经常更新的控制面应用或算法，例如：
+
+- **拥塞控制**：ECN 标记处理、RED/WRED 队列水位判断、拥塞感知的流调度策略；
+- **流量控制**：令牌桶/漏桶整形、流级速率统计与限速；
+- **链路探测**：BFD、LLDP、链路质量检测与故障上报；
+- **路由协议**：BGP/OSPF 邻居状态机、路由表学习与下发。
+
+相比把逻辑固化在 RTL 中，这种"软"控制面可随时更新固件而无需重新综合整个芯片，且 PicoRV32 面积小、功耗低，非常适合嵌入大型逻辑芯片做可编程协处理器。
+
 ## 特性
 
 - **PicoRV32 AXI4-Lite**：`picorv32_axi` 作为 CPU 主口（RV32IM，兼容 CoreMark）。
@@ -90,19 +101,21 @@ picorv32-soc/
 
 ## 地址映射
 
+全部 AXI-Lite 从口压缩在 **2MB** 以内，每个从口占 **64KB**（`0x10000`）窗口，便于移植到其他芯片作为协处理器。
+
 | 区域     | 基地址     | 说明                                              |
 |----------|-----------|---------------------------------------------------|
 | RAM      | 0x00000000 | 64KB 程序/数据 RAM（AXI4-Lite）                   |
-| BOOT     | 0x10000000 | boot_ctrl：bit0=cpu_resetn（写），状态只读         |
-| IRQ      | 0x20000000 | irq_ctrl：IER / IPR / MER                          |
-| I2C0     | 0x30000000 | i2c_master_axil                                    |
-| I2C1     | 0x30010000 | i2c_master_axil                                    |
-| I2C2     | 0x30020000 | i2c_master_axil                                    |
-| I2C3     | 0x30030000 | i2c_master_axil                                    |
-| UART0    | 0x40000000 | uart_axil（TX/RX/状态/预分频）                     |
-| UART1    | 0x40010000 | uart_axil                                          |
-| APB0     | 0x50000000 | GPIO @+0x0000，TIMER0 @+0x1000                     |
-| APB1     | 0x60000000 | CTRL @+0x0000，TIMER1 @+0x1000                     |
+| BOOT     | 0x00010000 | boot_ctrl：bit0=cpu_resetn（写），状态只读         |
+| IRQ      | 0x00020000 | irq_ctrl：IER / IPR / MER                          |
+| I2C0     | 0x00030000 | i2c_master_axil                                    |
+| I2C1     | 0x00040000 | i2c_master_axil                                    |
+| I2C2     | 0x00050000 | i2c_master_axil                                    |
+| I2C3     | 0x00060000 | i2c_master_axil                                    |
+| UART0    | 0x00070000 | uart_axil（TX/RX/状态/预分频）                     |
+| UART1    | 0x00080000 | uart_axil                                          |
+| APB0     | 0x00090000 | GPIO @+0x0000，TIMER0 @+0x1000                     |
+| APB1     | 0x000A0000 | CTRL @+0x0000，TIMER1 @+0x1000                     |
 
 中断源映射（irq_ctrl 输入）：`[0] uart0_rx [1] uart0_tx [2] uart1_rx [3] uart1_tx [4] timer0 [5] timer1 [6] gpio`，汇总后接 PicoRV32 的 `irq[5]`。
 

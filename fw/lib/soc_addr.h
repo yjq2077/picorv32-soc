@@ -12,17 +12,18 @@ extern "C" {
 #endif
 
 // AXI-Lite slave regions (see soc_top.v address map comment)
+// Compact map: all within 2 MB, one 64 KB (0x10000) window per port
 #define RAM_BASE        0x00000000UL
-#define BOOT_BASE       0x10000000UL
-#define IRQ_BASE        0x20000000UL
-#define I2C0_BASE       0x30000000UL
-#define I2C1_BASE       0x30010000UL
-#define I2C2_BASE       0x30020000UL
-#define I2C3_BASE       0x30030000UL
-#define UART0_BASE      0x40000000UL
-#define UART1_BASE      0x40010000UL
-#define APB0_BASE       0x50000000UL
-#define APB1_BASE       0x60000000UL
+#define BOOT_BASE       0x00010000UL
+#define IRQ_BASE        0x00020000UL
+#define I2C0_BASE       0x00030000UL
+#define I2C1_BASE       0x00040000UL
+#define I2C2_BASE       0x00050000UL
+#define I2C3_BASE       0x00060000UL
+#define UART0_BASE      0x00070000UL
+#define UART1_BASE      0x00080000UL
+#define APB0_BASE       0x00090000UL
+#define APB1_BASE       0x000A0000UL
 
 // APB0 slaves:  GPIO @ +0x0000, TIMER0 @ +0x1000
 #define GPIO_BASE       (APB0_BASE + 0x0000UL)
@@ -32,11 +33,11 @@ extern "C" {
 #define CTRL_BASE       (APB1_BASE + 0x0000UL)
 #define TIMER1_BASE     (APB1_BASE + 0x1000UL)
 
-// boot_ctrl registers (0x10000000)
+// boot_ctrl registers (0x00010000)
 #define BOOT_CTRL       (BOOT_BASE + 0x00UL)   // RW bit0 = cpu_resetn
 #define BOOT_STATUS     (BOOT_BASE + 0x04UL)   // RO bit0=cpu_resetn, bit1=cpu_trap
 
-// irq_ctrl registers (0x20000000)
+// irq_ctrl registers (0x00020000)
 #define IRQ_IER         (IRQ_BASE + 0x00UL)   // RW [15:0] interrupt enable
 #define IRQ_IPR         (IRQ_BASE + 0x04UL)   // RO [15:0] pending = irq_src & IER
 #define IRQ_MER         (IRQ_BASE + 0x08UL)   // RW [0]    master enable
@@ -90,7 +91,7 @@ extern "C" {
 #define I2C_DATA_VALID        (1u << 8)
 #define I2C_DATA_LAST         (1u << 9)
 
-// apb_gpio registers (0x50000000)
+// apb_gpio registers (0x00090000)
 #define GPIO_OUT        (GPIO_BASE + 0x00UL)
 #define GPIO_IN         (GPIO_BASE + 0x04UL)
 #define GPIO_DIR        (GPIO_BASE + 0x08UL)
@@ -98,7 +99,7 @@ extern "C" {
 #define GPIO_IPR        (GPIO_BASE + 0x10UL)
 #define GPIO_IC         (GPIO_BASE + 0x14UL)
 
-// apb_timer registers (0x50001000 / 0x60001000)
+// apb_timer registers (0x00091000 / 0x000A1000)
 #define TIMER_CTRL      (TIMER_BASE + 0x00UL)
 #define TIMER_RELOAD    (TIMER_BASE + 0x04UL)
 #define TIMER_COUNT     (TIMER_BASE + 0x08UL)
@@ -107,7 +108,7 @@ extern "C" {
 #define TIMER_CTRL_IRQ_EN     (1u << 1)
 #define TIMER_CTRL_AUTORELOAD (1u << 2)
 
-// apb_ctrl registers (0x60000000)
+// apb_ctrl registers (0x000A0000)
 #define CTRL_REG0       (CTRL_BASE + 0x00UL)
 #define CTRL_REG1       (CTRL_BASE + 0x04UL)
 #define CTRL_REG2       (CTRL_BASE + 0x08UL)

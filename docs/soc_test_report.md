@@ -2,10 +2,11 @@
 
 - **测试对象**：PicoRV32 SoC（`soc_top.v`，AXI-Lite 架构）
 - **测试平台**：Verilator 5.050（`--timing`，仿真时钟 100 MHz，周期 10 ns）
-- **测试日期**：2026-08-29（阶段一：裸机外设自测）/ 2026-08-30（阶段二、三：RT-Thread 移植与中断路径优化）
+- **测试日期**：2026-08-29（阶段一：裸机外设自测）/ 2026-08-30（阶段二、三：RT-Thread 移植与中断路径优化；阶段四：地址压缩）
 - **总体结论**：**PASS**
   - 阶段一：14/14 项外设检查全部通过，0 失败，无 CPU trap；
-  - 阶段二/三：RT-Thread 8/8 任务全部通过（`ctrl1=0x0000beef`），中断路径经三轮优化总周期下降约 9.3%。
+  - 阶段二/三：RT-Thread 8/8 任务全部通过（`ctrl1=0x0000beef`），中断路径经三轮优化总周期下降约 9.3%；
+  - 阶段四：地址压缩至 2MB 内（每从口 64KB）后回归通过，性能与压缩前一致。
 
 > 本文第 1-6 节为阶段一裸机外设验证与总线/中断时序分析；第 7 节起为阶段二、三（RT-Thread 移植 + 中断优化）的测试数据与性能对比。
 
@@ -13,17 +14,17 @@
 
 ## 1. 系统架构与地址映射
 
-本 SoC 采用双主（PicoRV32 CPU + 外部主机下载口）AXI-Lite 互连（`axil_interconnect`，来自 Verilog-AXI 基础设施库），挂接 11 个从口：
+本 SoC 采用双主（PicoRV32 CPU + 外部主机下载口）AXI-Lite 互连（`axil_interconnect`，来自 Verilog-AXI 基础设施库），挂接 11 个从口。**阶段四起全部从口压缩在 2MB 地址空间内，每个从口仅占 64KB（`0x10000`）窗口**，便于作为协处理器嵌入其他大型逻辑芯片：
 
 | 从口 | 基地址 | 外设 | 说明 |
 |---|---|---|---|
 | 0 | `0x00000000` | `axil_ram` | 64 KB 指令/数据 RAM |
-| 1 | `0x10000000` | `boot_ctrl` | CPU 复位控制（下载用） |
-| 2 | `0x20000000` | `irq_ctrl` | 中断控制器（16 源聚合） |
-| 3-6 | `0x30000000`+ | `i2c_master_axil` ×4 | I2C 主控制器（alexforencich） |
-| 7-8 | `0x40000000`+ | `uart_axil` ×2 | UART 串口（alexforencich） |
-| 9 | `0x50000000` | APB0：GPIO + TIMER0 | 经 `axil2apb` 桥 + `apb_interconnect` |
-| 10 | `0x60000000` | APB1：CTRL + TIMER1 | 经 `axil2apb` 桥 + `apb_interconnect` |
+| 1 | `0x00010000` | `boot_ctrl` | CPU 复位控制（下载用） |
+| 2 | `0x00020000` | `irq_ctrl` | 中断控制器（16 源聚合） |
+| 3-6 | `0x00030000`~`0x00060000` | `i2c_master_axil` ×4 | I2C 主控制器（alexforencich） |
+| 7-8 | `0x00070000`~`0x00080000` | `uart_axil` ×2 | UART 串口（alexforencich） |
+| 9 | `0x00090000` | APB0：GPIO + TIMER0 | 经 `axil2apb` 桥 + `apb_interconnect` |
+| 10 | `0x000A0000` | APB1：CTRL + TIMER1 | 经 `axil2apb` 桥 + `apb_interconnect` |
 
 中断映射：`[0]` UART0_RX、`[1]` UART0_TX、`[2]` UART1_RX、`[3]` UART1_TX、`[4]` TIMER0、`[5]` TIMER1、`[6]` GPIO，聚合后送入 PicoRV32 `irq[5]`。
 
@@ -52,7 +53,7 @@
 
 ## 3. 外设读写验证数据
 
-### 3.1 boot_ctrl（复位控制，0x10000000）
+### 3.1 boot_ctrl（复位控制，0x00010000）
 
 | 操作 | 地址 | 数据 | 结果 |
 |---|---|---|---|
@@ -61,7 +62,7 @@
 
 固件检查 `BOOT_STATUS & 0x1 == 1`（复位已释放）、`BOOT_STATUS & 0x2 == 0`（无 trap）均通过。
 
-### 3.2 irq_ctrl（中断控制器，0x20000000）
+### 3.2 irq_ctrl（中断控制器，0x00020000）
 
 捕获到的 AXI-Lite 读写序列（AW/W 与 R 均为 3 拍事务）：
 
@@ -83,7 +84,7 @@
 
 **验证结论**：IER 使能位、MER 主开关、IPR 挂起读回全部正确；TIMER0 与 GPIO 中断源均被正确识别。
 
-### 3.3 GPIO（APB0，0x50000000）
+### 3.3 GPIO（APB0，0x00090000）
 
 | 操作 | 地址 | 写数据 | 读回数据 | 结果 |
 |---|---|---|---|---|
@@ -95,7 +96,7 @@
 
 GPIO 输入采样、输出回读、方向控制均正确。GPIO 上升沿中断（bit0）由 TB 在 "GPIOIRQ" 标记后翻转 `gpio_in[0]` 触发，ISR 通过 IPR 识别并清除，中断触发验证通过。
 
-### 3.4 CTRL 控制寄存器（APB1，0x60000000）
+### 3.4 CTRL 控制寄存器（APB1，0x000A0000）
 
 | 操作 | 地址 | 写数据 | 读回数据 | 结果 |
 |---|---|---|---|---|
@@ -105,7 +106,7 @@ GPIO 输入采样、输出回读、方向控制均正确。GPIO 上升沿中断�
 | 写/读 REG2 | 0x08 | 0x55556666 | 0x55556666 | PASS |
 | 写 REG1 | 0x04 | 0x0000BEEF | - | 结果标记（PASS） |
 
-### 3.5 UART0 / UART1（0x40000000 / 0x40010000）
+### 3.5 UART0 / UART1（0x00070000 / 0x00080000）
 
 配置：`UART_PRESCALE=2`，位时间 = 2×8 = 16 拍 = 160 ns → **波特率 6.25 Mbps**。
 
@@ -127,7 +128,7 @@ uart0 rx byte = 0x41 'A'     [PASS] uart0 rx
 
 RX 数据正确无毛刺、无误码，验证了此前修复的 RX 位采样时序（8×prescale 位周期对齐）。
 
-### 3.6 I2C0（0x30000000，alexforencich i2c_master_axil）
+### 3.6 I2C0（0x00030000，alexforencich i2c_master_axil）
 
 对挂接在总线 0 上的 7 位地址 `0x50` 的 EEPROM 从模型执行读写：
 
@@ -138,7 +139,7 @@ RX 数据正确无毛刺、无误码，验证了此前修复的 RX 位采样时�
 
 读回数据与写入数据逐字节一致，验证 START/STOP、地址+ACK、多字节连续传输协议。全测试期间总线 0 共产生 **111 次 SCL 下降沿**（含地址、数据、ACK 位），总线活动正常。
 
-### 3.7 TIMER0（APB0，0x50001000）
+### 3.7 TIMER0（APB0，0x00091000）
 
 **单次模式（one-shot）**：`RELOAD=0x3E8`（1000），使能后轮询 COUNT 寄存器，捕获到的完整计数序列：
 
@@ -324,6 +325,43 @@ RAM 读事务绝大部分为取指，写事务为固件数据写入；双主仲�
 3. 内存停等（经 AXI-Lite 互联访问 RAM）是中断向量的主要开销来源（72%），方向 2 通过减少现场保存/恢复的访存次数直接削减停等 700k 周期。
 
 ---
+
+## 10. 阶段四：地址压缩（2MB 内，每从口 64KB）
+
+原地址映射分布在 0x10000000~0x60000000 高位地址空间，编址范围过大，不适合移植到其他芯片作为协处理器。本阶段将全部 AXI-Lite 从口压缩到 **2MB 以内**，每个从口固定 **64KB（`0x10000`）窗口**，便于嵌入大型逻辑芯片（如智能网卡）内部总线，作为可编程协处理器运行拥塞控制、流量控制、链路探测、路由协议等需要经常更新的控制面应用。
+
+### 10.1 改动内容
+
+| 文件 | 改动 |
+|---|---|
+| `rtl/soc/soc_top.v` | `axil_interconnect` 的 `M_BASE_ADDR` / `M_ADDR_WIDTH` 改为紧凑映射，全部从口 `M_ADDR_WIDTH=16`（64KB） |
+| `fw/lib/soc_addr.h` | 全部外设基地址宏同步更新为 2MB 内新地址 |
+| `sim/soc_tb.v` | 主机口释放 CPU 复位的 `boot_ctrl` 地址 `0x10000000 → 0x00010000` |
+| `fw/lib/gpio.c` | 注释中的 GPIO 基地址更新 |
+
+新地址映射（详见第 1 节）：RAM `0x00000000`、BOOT `0x00010000`、IRQ `0x00020000`、I2C0-3 `0x00030000`~`0x00060000`、UART0/1 `0x00070000`/`0x00080000`、APB0 `0x00090000`（GPIO+TIMER0）、APB1 `0x000A0000`（CTRL+TIMER1），总计仅占 **0x000AFFFF（< 2MB）**。
+
+### 10.2 回归结果
+
+地址压缩后重新编译固件与仿真，**8/8 RT-Thread 任务全部 PASS，`ctrl1=0x0000beef`，无 CPU trap**：
+
+```
+[host] fw.hex loaded: 5341 words (21364 bytes)
+[host] downloaded 5341 words to RAM
+[host] ram[0]  = 0x4840006f
+[host] cpu reset released (boot_ctrl=1)
+=== TEST RESULT: PASS (ctrl1=0x0000beef) ===
+[dbg] uart0 txd_write=974 rxd_read=1 tx_pend_hi=974 int_tx_hi=9181495 ier1_hi=4142351
+[dbg] irq rise=1990 high=4008903 cyc cpu_irq_taken=5471129 timer0_irq_hi=170913
+[dbg] cyc total=9340283 irq_vec=3530240 irq_fn=962668 rt_sched=7146 ctx_asw=366608 tick=27076 sem=7486
+[dbg] stall total=6506143 irqvec=2564226 (irqvec stall 72%)
+```
+
+关键性能指标与地址压缩前（阶段三方向 2 最终版）**完全一致**：`total=9,340,283`、`irq_vec=3,530,240`、`ctx_asw=366,608`、UART TX 974 字符。地址译码宽度与基址对齐（全部基址为 `0x10000` 倍数）不影响互联仲裁与事务延迟。
+
+### 10.3 回归过程中的关键问题
+
+首次回归 **TIMEOUT**：CPU 卡在 `poll_status` 死循环（PC 0x1644/0x1654），且全程零外设写操作。定位后发现 `fw/fw.elf` 的 `.data` 中 `uart0_inst.base=0x40000000`（旧地址）——`fw/Makefile` 的 `%.o: %.c` 规则不含头文件依赖，修改 `soc_addr.h` 后 `board.o` 等对象未重编，链接使用了旧对象。**`make clean && make` 强制重建后恢复正常**。建议后续为 Makefile 增加 `-MMD` 头文件依赖生成，避免同类问题。
 
 ## 附录 A：固件完整运行日志
 

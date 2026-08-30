@@ -373,7 +373,7 @@ module soc_tb;
         $display("[host] ram[%0d] = 0x%08x", nwords-1, rd);
 
         // release CPU reset via boot_ctrl CTRL register
-        axil_write(32'h10000000, 32'h00000001, 4'hF);
+        axil_write(32'h00010000, 32'h00000001, 4'hF);   // boot_ctrl: release CPU reset
         $display("[host] cpu reset released (boot_ctrl=1)");
 
         // wait for CPU trap or result marker (or a sustained CPU stall)

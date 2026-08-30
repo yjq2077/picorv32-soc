@@ -8,18 +8,18 @@
 //   0: PicoRV32 CPU (internal)
 //   1: External host / firmware download port (top-level AXI-Lite slave)
 //
-// Slaves:
+// Slaves (compact map: all within 2 MB, one 64 KB window per port):
 //   0: 0x00000000  RAM        (axil_ram, 64KB)
-//   1: 0x10000000  BOOT       (boot_ctrl: CPU reset control)
-//   2: 0x20000000  IRQ        (irq_ctrl: interrupt controller)
-//   3: 0x30000000  I2C0
-//   4: 0x30010000  I2C1
-//   5: 0x30020000  I2C2
-//   6: 0x30030000  I2C3
-//   7: 0x40000000  UART0
-//   8: 0x40010000  UART1
-//   9: 0x50000000  APB0       (GPIO @ +0x0000, TIMER0 @ +0x1000)
-//  10: 0x60000000  APB1       (CTRL @ +0x0000, TIMER1 @ +0x1000)
+//   1: 0x00010000  BOOT       (boot_ctrl: CPU reset control)
+//   2: 0x00020000  IRQ        (irq_ctrl: interrupt controller)
+//   3: 0x00030000  I2C0
+//   4: 0x00040000  I2C1
+//   5: 0x00050000  I2C2
+//   6: 0x00060000  I2C3
+//   7: 0x00070000  UART0
+//   8: 0x00080000  UART1
+//   9: 0x00090000  APB0       (GPIO @ +0x0000, TIMER0 @ +0x1000)
+//  10: 0x000A0000  APB1       (CTRL @ +0x0000, TIMER1 @ +0x1000)
 //
 // Interrupt mapping (irq_ctrl inputs):
 //   [0] uart0_rx  [1] uart0_tx  [2] uart1_rx  [3] uart1_tx
@@ -252,12 +252,12 @@ module soc_top #(
         .ADDR_WIDTH     (ADDR_WIDTH),
         .STRB_WIDTH     (STRB_WIDTH),
         .M_REGIONS      (1),
-        // field 0 (LSB) = slave port 0 = RAM
-        .M_BASE_ADDR    ({32'h60000000, 32'h50000000, 32'h40010000, 32'h40000000,
-                          32'h30030000, 32'h30020000, 32'h30010000, 32'h30000000,
-                          32'h20000000, 32'h10000000, 32'h00000000}),
-        .M_ADDR_WIDTH   ({32'd16, 32'd16, 32'd4, 32'd4, 32'd4, 32'd4, 32'd4, 32'd4,
-                          32'd4, 32'd4, 32'd16})
+        // field 0 (LSB) = slave port 0 = RAM; every port gets a 64KB (2^16) window
+        .M_BASE_ADDR    ({32'h000A0000, 32'h00090000, 32'h00080000, 32'h00070000,
+                          32'h00060000, 32'h00050000, 32'h00040000, 32'h00030000,
+                          32'h00020000, 32'h00010000, 32'h00000000}),
+        .M_ADDR_WIDTH   ({32'd16, 32'd16, 32'd16, 32'd16, 32'd16, 32'd16,
+                          32'd16, 32'd16, 32'd16, 32'd16, 32'd16})
     ) u_ic (
         .clk            (clk),
         .rst            (rst),
