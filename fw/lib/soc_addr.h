@@ -36,6 +36,8 @@ extern "C" {
 // boot_ctrl registers (0x00010000)
 #define BOOT_CTRL       (BOOT_BASE + 0x00UL)   // RW bit0 = cpu_resetn
 #define BOOT_STATUS     (BOOT_BASE + 0x04UL)   // RO bit0=cpu_resetn, bit1=cpu_trap
+#define BOOT_APB0_BASE  (BOOT_BASE + 0x08UL)   // RW APB0 window base (0 = fixed default)
+#define BOOT_APB1_BASE  (BOOT_BASE + 0x0CUL)   // RW APB1 window base (0 = fixed default)
 
 // irq_ctrl registers (0x00020000)
 #define IRQ_IER         (IRQ_BASE + 0x00UL)   // RW [15:0] interrupt enable

@@ -3,9 +3,11 @@
 // firmware to RAM, then releases reset by setting CTRL[0].
 //
 // Registers (4-bit address, 32-bit data):
-//   0x00  CTRL    (RW) bit0 = cpu_resetn  (1=release, 0=hold reset)
-//   0x04  STATUS  (RO) bit0 = cpu_resetn readback
-//                       bit1 = cpu_trap (PicoRV32 trap output)
+//   0x00  CTRL      (RW) bit0 = cpu_resetn  (1=release, 0=hold reset)
+//   0x04  STATUS    (RO) bit0 = cpu_resetn readback
+//                         bit1 = cpu_trap (PicoRV32 trap output)
+//   0x08  APB0_BASE (RW) APB0 window base address; 0 = fixed default 0x00090000
+//   0x0C  APB1_BASE (RW) APB1 window base address; 0 = fixed default 0x000A0000
 module boot_ctrl #(
     parameter integer ADDR_WIDTH = 32,
     parameter integer DATA_WIDTH = 32
@@ -36,13 +38,19 @@ module boot_ctrl #(
 
     // Control interface
     input  wire                   cpu_trap,
-    output wire                   cpu_resetn
+    output wire                   cpu_resetn,
+
+    // APB window base addresses (0 = use fixed default map in soc_top)
+    output wire [DATA_WIDTH-1:0]  apb0_base,
+    output wire [DATA_WIDTH-1:0]  apb1_base
 );
 
     localparam [1:0] IDLE = 2'd0, W_RESP = 2'd1, R_RESP = 2'd2;
 
     reg [1:0] state;
     reg [DATA_WIDTH-1:0] ctrl;
+    reg [DATA_WIDTH-1:0] apb0_base_reg;
+    reg [DATA_WIDTH-1:0] apb1_base_reg;
     reg [DATA_WIDTH-1:0] rdata;
     reg aw_hs, w_hs, ar_hs;
 
@@ -55,6 +63,8 @@ module boot_ctrl #(
     assign s_axil_rvalid  = (state == R_RESP);
     assign s_axil_rdata   = rdata;
     assign cpu_resetn     = ctrl[0];
+    assign apb0_base      = apb0_base_reg;
+    assign apb1_base      = apb1_base_reg;
 
     wire write_en = aw_hs && w_hs;
 
@@ -62,6 +72,8 @@ module boot_ctrl #(
         if (rst) begin
             state <= IDLE;
             ctrl  <= 0;            // default: hold CPU in reset
+            apb0_base_reg <= 0;    // default: fixed APB0 map (0x00090000)
+            apb1_base_reg <= 0;    // default: fixed APB1 map (0x000A0000)
             rdata <= 0;
             aw_hs <= 0;
             w_hs  <= 0;
@@ -72,7 +84,19 @@ module boot_ctrl #(
                     // capture address/data handshakes independently
                     if (aw_hs && w_hs) begin
                         // write data
-                        if (s_axil_wstrb[0]) ctrl[7:0] <= s_axil_wdata[7:0];
+                        if (s_axil_awaddr == 4'h0) begin
+                            if (s_axil_wstrb[0]) ctrl[7:0] <= s_axil_wdata[7:0];
+                        end else if (s_axil_awaddr == 4'h8) begin
+                            if (s_axil_wstrb[0]) apb0_base_reg[7:0]   <= s_axil_wdata[7:0];
+                            if (s_axil_wstrb[1]) apb0_base_reg[15:8]  <= s_axil_wdata[15:8];
+                            if (s_axil_wstrb[2]) apb0_base_reg[23:16] <= s_axil_wdata[23:16];
+                            if (s_axil_wstrb[3]) apb0_base_reg[31:24] <= s_axil_wdata[31:24];
+                        end else if (s_axil_awaddr == 4'hC) begin
+                            if (s_axil_wstrb[0]) apb1_base_reg[7:0]   <= s_axil_wdata[7:0];
+                            if (s_axil_wstrb[1]) apb1_base_reg[15:8]  <= s_axil_wdata[15:8];
+                            if (s_axil_wstrb[2]) apb1_base_reg[23:16] <= s_axil_wdata[23:16];
+                            if (s_axil_wstrb[3]) apb1_base_reg[31:24] <= s_axil_wdata[31:24];
+                        end
                         aw_hs <= 0; w_hs <= 0;
                         state <= W_RESP;
                     end else begin
@@ -83,6 +107,8 @@ module boot_ctrl #(
                             case (s_axil_araddr)
                                 4'h0: rdata <= {31'b0, ctrl[0]};
                                 4'h4: rdata <= {30'b0, cpu_trap, ctrl[0]};
+                                4'h8: rdata <= apb0_base_reg;
+                                4'hC: rdata <= apb1_base_reg;
                                 default: rdata <= 32'h0;
                             endcase
                             ar_hs <= 1;

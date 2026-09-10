@@ -10,7 +10,7 @@
 //
 // Slaves (compact map: all within 2 MB, one 64 KB window per port):
 //   0: 0x00000000  RAM        (axil_ram, 64KB)
-//   1: 0x00010000  BOOT       (boot_ctrl: CPU reset control)
+//   1: 0x00010000  BOOT       (boot_ctrl: CPU reset control + APB base addrs)
 //   2: 0x00020000  IRQ        (irq_ctrl: interrupt controller)
 //   3: 0x00030000  I2C0
 //   4: 0x00040000  I2C1
@@ -20,6 +20,9 @@
 //   8: 0x00080000  UART1
 //   9: 0x00090000  APB0       (GPIO @ +0x0000, TIMER0 @ +0x1000)
 //  10: 0x000A0000  APB1       (CTRL @ +0x0000, TIMER1 @ +0x1000)
+//
+// APB0/APB1 windows are relocatable: boot_ctrl APB0_BASE / APB1_BASE
+// registers (default 0) override the fixed bases above when non-zero.
 //
 // Interrupt mapping (irq_ctrl inputs):
 //   [0] uart0_rx  [1] uart0_tx  [2] uart1_rx  [3] uart1_tx
@@ -188,6 +191,9 @@ module soc_top #(
     wire [ADDR_WIDTH-1:0] boot_araddr;  wire [ 2:0] boot_arprot;  wire boot_arvalid;  wire boot_arready;
     wire [DATA_WIDTH-1:0] boot_rdata;   wire [ 1:0] boot_rresp;   wire boot_rvalid;   wire boot_rready;
 
+    wire [DATA_WIDTH-1:0] boot_apb0_base;   // APB0 window base (0 = fixed default)
+    wire [DATA_WIDTH-1:0] boot_apb1_base;   // APB1 window base (0 = fixed default)
+
     wire [ADDR_WIDTH-1:0] irq_awaddr;   wire [ 2:0] irq_awprot;   wire irq_awvalid;   wire irq_awready;
     wire [DATA_WIDTH-1:0] irq_wdata;    wire [STRB_WIDTH-1:0] irq_wstrb; wire irq_wvalid; wire irq_wready;
     wire [ 1:0] irq_bresp;              wire irq_bvalid;         wire irq_bready;
@@ -257,7 +263,10 @@ module soc_top #(
                           32'h00060000, 32'h00050000, 32'h00040000, 32'h00030000,
                           32'h00020000, 32'h00010000, 32'h00000000}),
         .M_ADDR_WIDTH   ({32'd16, 32'd16, 32'd16, 32'd16, 32'd16, 32'd16,
-                          32'd16, 32'd16, 32'd16, 32'd16, 32'd16})
+                          32'd16, 32'd16, 32'd16, 32'd16, 32'd16}),
+        // ports 9 (APB0) and 10 (APB1) take their base address from the
+        // boot_ctrl APB0_BASE / APB1_BASE registers (0 = fixed map above)
+        .M_DYNAMIC_BASE (11'b11000000000)
     ) u_ic (
         .clk            (clk),
         .rst            (rst),
@@ -341,7 +350,9 @@ module soc_top #(
                           irq_rvalid, boot_rvalid, ram_rvalid}),
         .m_axil_rready  ({apb1_rready, apb0_rready, uart1_rready, uart0_rready,
                           i2c3_rready, i2c2_rready, i2c1_rready, i2c0_rready,
-                          irq_rready, boot_rready, ram_rready})
+                          irq_rready, boot_rready, ram_rready}),
+        // dynamic bases: port 10=APB1, port 9=APB0, others unused (0)
+        .m_axil_base_addr ({boot_apb1_base, boot_apb0_base, 9*{32'd0}})
     );
 
     // ------------------------------------------------------------------
@@ -404,7 +415,9 @@ module soc_top #(
         .s_axil_rvalid  (boot_rvalid),
         .s_axil_rready  (boot_rready),
         .cpu_trap       (cpu_trap),
-        .cpu_resetn     (cpu_resetn)
+        .cpu_resetn     (cpu_resetn),
+        .apb0_base      (boot_apb0_base),
+        .apb1_base      (boot_apb1_base)
     );
 
     // ------------------------------------------------------------------

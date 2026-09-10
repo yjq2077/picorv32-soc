@@ -52,6 +52,11 @@ module axil_interconnect #
     // Master interface address widths
     // M_COUNT concatenated fields of M_REGIONS concatenated fields of 32 bits
     parameter M_ADDR_WIDTH = {M_COUNT{{M_REGIONS{32'd24}}}},
+    // Dynamic (runtime) base address enables
+    // M_COUNT bits; bit i set => master interface i takes its base address
+    // from the m_axil_base_addr input (0 in the input = fixed default from
+    // M_BASE_ADDR). Requires M_REGIONS == 1 for dynamic ports.
+    parameter M_DYNAMIC_BASE = 0,
     // Read connections between interfaces
     // M_COUNT concatenated fields of S_COUNT bits
     parameter M_CONNECT_READ = {M_COUNT{{S_COUNT{1'b1}}}},
@@ -110,7 +115,12 @@ module axil_interconnect #
     input  wire [M_COUNT*DATA_WIDTH-1:0]  m_axil_rdata,
     input  wire [M_COUNT*2-1:0]           m_axil_rresp,
     input  wire [M_COUNT-1:0]             m_axil_rvalid,
-    output wire [M_COUNT-1:0]             m_axil_rready
+    output wire [M_COUNT-1:0]             m_axil_rready,
+
+    /*
+     * Dynamic base addresses (used when M_DYNAMIC_BASE[i] is set)
+     */
+    input  wire [M_COUNT*ADDR_WIDTH-1:0]  m_axil_base_addr
 );
 
 parameter CL_S_COUNT = $clog2(S_COUNT);
@@ -142,6 +152,19 @@ function [M_COUNT*M_REGIONS*ADDR_WIDTH-1:0] calcBaseAddrs(input [31:0] dummy);
 endfunction
 
 parameter M_BASE_ADDR_INT = M_BASE_ADDR ? M_BASE_ADDR : calcBaseAddrs(0);
+
+// effective base address per master interface: dynamic input overrides the
+// static default when M_DYNAMIC_BASE[i] is set and the input is non-zero
+wire [M_COUNT*ADDR_WIDTH-1:0] base_addr_int;
+genvar gi;
+generate
+for (gi = 0; gi < M_COUNT; gi = gi + 1) begin
+    assign base_addr_int[gi*ADDR_WIDTH +: ADDR_WIDTH] =
+        (M_DYNAMIC_BASE[gi] && (m_axil_base_addr[gi*ADDR_WIDTH +: ADDR_WIDTH] != {ADDR_WIDTH{1'b0}})) ?
+        m_axil_base_addr[gi*ADDR_WIDTH +: ADDR_WIDTH] :
+        M_BASE_ADDR_INT[gi*ADDR_WIDTH +: ADDR_WIDTH];
+end
+endgenerate
 
 integer i, j;
 
@@ -409,7 +432,7 @@ always @* begin
             match = 1'b0;
             for (i = 0; i < M_COUNT; i = i + 1) begin
                 for (j = 0; j < M_REGIONS; j = j + 1) begin
-                    if (M_ADDR_WIDTH[(i*M_REGIONS+j)*32 +: 32] && (!M_SECURE[i] || !axil_prot_reg[1]) && ((read ? M_CONNECT_READ : M_CONNECT_WRITE) & (1 << (s_select+i*S_COUNT))) && (axil_addr_reg >> M_ADDR_WIDTH[(i*M_REGIONS+j)*32 +: 32]) == (M_BASE_ADDR_INT[(i*M_REGIONS+j)*ADDR_WIDTH +: ADDR_WIDTH] >> M_ADDR_WIDTH[(i*M_REGIONS+j)*32 +: 32])) begin
+                    if (M_ADDR_WIDTH[(i*M_REGIONS+j)*32 +: 32] && (!M_SECURE[i] || !axil_prot_reg[1]) && ((read ? M_CONNECT_READ : M_CONNECT_WRITE) & (1 << (s_select+i*S_COUNT))) && (axil_addr_reg >> M_ADDR_WIDTH[(i*M_REGIONS+j)*32 +: 32]) == (base_addr_int[(i*M_REGIONS+j)*ADDR_WIDTH +: ADDR_WIDTH] >> M_ADDR_WIDTH[(i*M_REGIONS+j)*32 +: 32])) begin
                         m_select_next = i;
                         match = 1'b1;
                     end

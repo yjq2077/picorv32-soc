@@ -21,6 +21,7 @@
   - 主口 1：外部主机口，可用于固件下载、内核复位控制，以及直接访问全部外设（调试）。
 - **64KB 程序 RAM**：AXI-Lite 接口，`axil_ram`，字节写使能支持。
 - **复位控制**：`boot_ctrl` 寄存器模块，外部主机可拉低/释放 CPU 复位以便下载固件。
+- **APB 窗口动态重定位**：`boot_ctrl` 新增 `APB0_BASE`（0x08）/ `APB1_BASE`（0x0C）两个 32 位寄存器（默认 0 = 固定映射），写入非零值即可在运行时把 APB0/APB1 从口整体搬到新基地址（经互联 `M_DYNAMIC_BASE` 动态译码）。
 - **外设**：4× I2C、2× UART、2× AXI-Lite→APB 桥（挂 GPIO、Timer、CTRL 寄存器）、1× 中断控制器（irq_ctrl）。
 - **RT-Thread**：Nano 内核已移植（`fw/rtos`），8 个测试任务并发运行全部 PASS（信号量同步、时钟节拍、中断驱动外设）。
 - **固件结构**：外设函数库（`fw/lib`，可独立发布）+ RT-Thread（`fw/rtos`）+ 应用（`fw/app`），全部外设读写自检。
@@ -106,7 +107,7 @@ picorv32-soc/
 | 区域     | 基地址     | 说明                                              |
 |----------|-----------|---------------------------------------------------|
 | RAM      | 0x00000000 | 64KB 程序/数据 RAM（AXI4-Lite）                   |
-| BOOT     | 0x00010000 | boot_ctrl：bit0=cpu_resetn（写），状态只读         |
+| BOOT     | 0x00010000 | boot_ctrl：bit0=cpu_resetn（写），状态只读；0x08=APB0_BASE，0x0C=APB1_BASE |
 | IRQ      | 0x00020000 | irq_ctrl：IER / IPR / MER                          |
 | I2C0     | 0x00030000 | i2c_master_axil                                    |
 | I2C1     | 0x00040000 | i2c_master_axil                                    |
@@ -114,8 +115,10 @@ picorv32-soc/
 | I2C3     | 0x00060000 | i2c_master_axil                                    |
 | UART0    | 0x00070000 | uart_axil（TX/RX/状态/预分频）                     |
 | UART1    | 0x00080000 | uart_axil                                          |
-| APB0     | 0x00090000 | GPIO @+0x0000，TIMER0 @+0x1000                     |
-| APB1     | 0x000A0000 | CTRL @+0x0000，TIMER1 @+0x1000                     |
+| APB0     | 0x00090000 | GPIO @+0x0000，TIMER0 @+0x1000（基地址可重定位）  |
+| APB1     | 0x000A0000 | CTRL @+0x0000，TIMER1 @+0x1000（基地址可重定位）  |
+
+**APB 窗口动态重定位**：`BOOT_APB0_BASE`（0x00010008）和 `BOOT_APB1_BASE`（0x0001000C）为 32 位读写寄存器，复位默认 **0**，表示保持上表固定地址（0x00090000 / 0x000A0000）；写入任意非零 64KB 对齐值后，对应 APB 从口整体搬到新基地址（窗口内偏移布局不变）。外部主控可借此避开与其他主设备的地址冲突。
 
 中断源映射（irq_ctrl 输入）：`[0] uart0_rx [1] uart0_tx [2] uart1_rx [3] uart1_tx [4] timer0 [5] timer1 [6] gpio`，汇总后接 PicoRV32 的 `irq[5]`。
 

@@ -2,13 +2,14 @@
 
 - **测试对象**：PicoRV32 SoC（`soc_top.v`，AXI-Lite 架构）
 - **测试平台**：Verilator 5.050（`--timing`，仿真时钟 100 MHz，周期 10 ns）
-- **测试日期**：2026-08-29（阶段一：裸机外设自测）/ 2026-08-30（阶段二、三：RT-Thread 移植与中断路径优化；阶段四：地址压缩）
+- **测试日期**：2026-08-29（阶段一：裸机外设自测）/ 2026-08-30（阶段二、三：RT-Thread 移植与中断路径优化；阶段四：地址压缩）/ 2026-09-10（阶段五：APB 基地址动态重定位）
 - **总体结论**：**PASS**
   - 阶段一：14/14 项外设检查全部通过，0 失败，无 CPU trap；
   - 阶段二/三：RT-Thread 8/8 任务全部通过（`ctrl1=0x0000beef`），中断路径经三轮优化总周期下降约 9.3%；
-  - 阶段四：地址压缩至 2MB 内（每从口 64KB）后回归通过，性能与压缩前一致。
+  - 阶段四：地址压缩至 2MB 内（每从口 64KB）后回归通过，性能与压缩前一致；
+  - 阶段五：boot_ctrl 新增 APB0_BASE/APB1_BASE 动态基地址寄存器，默认值与读写回读验证通过，8/8 任务回归 PASS。
 
-> 本文第 1-6 节为阶段一裸机外设验证与总线/中断时序分析；第 7 节起为阶段二、三（RT-Thread 移植 + 中断优化）的测试数据与性能对比。
+> 本文第 1-6 节为阶段一裸机外设验证与总线/中断时序分析；第 7 节起为阶段二、三（RT-Thread 移植 + 中断优化）的测试数据与性能对比；第 10 节为阶段四地址压缩；第 11 节为阶段五 APB 动态重定位。
 
 ---
 
@@ -19,12 +20,14 @@
 | 从口 | 基地址 | 外设 | 说明 |
 |---|---|---|---|
 | 0 | `0x00000000` | `axil_ram` | 64 KB 指令/数据 RAM |
-| 1 | `0x00010000` | `boot_ctrl` | CPU 复位控制（下载用） |
+| 1 | `0x00010000` | `boot_ctrl` | CPU 复位控制（下载用）+ APB0_BASE/APB1_BASE 动态基地址寄存器 |
 | 2 | `0x00020000` | `irq_ctrl` | 中断控制器（16 源聚合） |
 | 3-6 | `0x00030000`~`0x00060000` | `i2c_master_axil` ×4 | I2C 主控制器（alexforencich） |
 | 7-8 | `0x00070000`~`0x00080000` | `uart_axil` ×2 | UART 串口（alexforencich） |
-| 9 | `0x00090000` | APB0：GPIO + TIMER0 | 经 `axil2apb` 桥 + `apb_interconnect` |
-| 10 | `0x000A0000` | APB1：CTRL + TIMER1 | 经 `axil2apb` 桥 + `apb_interconnect` |
+| 9 | `0x00090000` | APB0：GPIO + TIMER0 | 经 `axil2apb` 桥 + `apb_interconnect`；**基地址可重定位** |
+| 10 | `0x000A0000` | APB1：CTRL + TIMER1 | 经 `axil2apb` 桥 + `apb_interconnect`；**基地址可重定位** |
+
+从口 9/10（APB0/APB1）的基地址可通过 `boot_ctrl` 的 `APB0_BASE`（0x08）/ `APB1_BASE`（0x0C）寄存器在运行时重定位：默认 **0** 表示使用上表固定地址，写入非零 64KB 对齐值后，互联模块（`M_DYNAMIC_BASE`）按动态基地址译码（详见第 11 节）。
 
 中断映射：`[0]` UART0_RX、`[1]` UART0_TX、`[2]` UART1_RX、`[3]` UART1_TX、`[4]` TIMER0、`[5]` TIMER1、`[6]` GPIO，聚合后送入 PicoRV32 `irq[5]`。
 
@@ -53,14 +56,19 @@
 
 ## 3. 外设读写验证数据
 
-### 3.1 boot_ctrl（复位控制，0x00010000）
+### 3.1 boot_ctrl（复位控制 + APB 基地址，0x00010000）
 
 | 操作 | 地址 | 数据 | 结果 |
 |---|---|---|---|
 | 主机写 CTRL | 0x00 | 0x1 | `cpu_resetn` 拉高，CPU 启动 |
 | CPU 读 STATUS | 0x04 | bit0=1（running）、bit1=0（trap 清除） | PASS |
+| 主机读 APB0_BASE | 0x08 | 0x00000000（复位默认） | PASS |
+| 主机读 APB1_BASE | 0x0C | 0x00000000（复位默认） | PASS |
+| 主机写 APB0_BASE | 0x08 | 0x000C0000 → 读回 0x000C0000 | PASS（RW） |
+| 主机写 APB1_BASE | 0x0C | 0x000D0000 → 读回 0x000D0000 | PASS（RW） |
+| 主机恢复默认 | 0x08 / 0x0C | 0x00000000 | 恢复固定映射 |
 
-固件检查 `BOOT_STATUS & 0x1 == 1`（复位已释放）、`BOOT_STATUS & 0x2 == 0`（无 trap）均通过。
+固件检查 `BOOT_STATUS & 0x1 == 1`（复位已释放）、`BOOT_STATUS & 0x2 == 0`（无 trap）均通过。APB 基地址寄存器为 32 位读写（复位默认 0），测试台完成下载后先验证默认值与读写回读，再恢复为 0 以保持固定地址映射，随后释放 CPU 复位。
 
 ### 3.2 irq_ctrl（中断控制器，0x00020000）
 
@@ -362,6 +370,47 @@ RAM 读事务绝大部分为取指，写事务为固件数据写入；双主仲�
 ### 10.3 回归过程中的关键问题
 
 首次回归 **TIMEOUT**：CPU 卡在 `poll_status` 死循环（PC 0x1644/0x1654），且全程零外设写操作。定位后发现 `fw/fw.elf` 的 `.data` 中 `uart0_inst.base=0x40000000`（旧地址）——`fw/Makefile` 的 `%.o: %.c` 规则不含头文件依赖，修改 `soc_addr.h` 后 `board.o` 等对象未重编，链接使用了旧对象。**`make clean && make` 强制重建后恢复正常**。建议后续为 Makefile 增加 `-MMD` 头文件依赖生成，避免同类问题。
+
+## 11. 阶段五：APB 基地址动态重定位
+
+### 11.1 需求与设计
+
+为方便外部主控在运行时避开与其他主设备的地址冲突，允许把 APB0/APB1 两个从口整体搬到新基地址。实现方式：
+
+- **`rtl/soc/boot_ctrl.v`**：新增两个 32 位读写寄存器 —— `APB0_BASE`（0x08）与 `APB1_BASE`（0x0C），复位默认 **0**，输出 `apb0_base` / `apb1_base`；
+- **`rtl/third_party/verilog-axi/rtl/axil_interconnect.v`**：新增参数 `M_DYNAMIC_BASE`（M_COUNT 位位向量）与输入 `m_axil_base_addr`。当 `M_DYNAMIC_BASE[i]=1` 且输入基地址非零时，从口 i 的译码基地址改用输入值；否则保持 `M_BASE_ADDR` 静态默认。该扩展向后兼容（默认参数与未接入输入时行为不变）；
+- **`rtl/soc/soc_top.v`**：`M_DYNAMIC_BASE = 11'b11000000000`（仅使能从口 9/10），`m_axil_base_addr` 接 `boot_ctrl` 输出（其余从口接 0）；
+- **`fw/lib/soc_addr.h`**：新增 `BOOT_APB0_BASE` / `BOOT_APB1_BASE` 宏。
+
+默认 0 = 固定映射（APB0 `0x00090000`、APB1 `0x000A0000`），固件/外部主控无感知变化；写入非零 64KB 对齐值后，窗口内偏移布局（GPIO/TIMER0、CTRL/TIMER1）不变。
+
+### 11.2 测试台验证
+
+`sim/soc_tb.v` 在固件下载完成后、释放 CPU 复位前，对外部主机口依次执行：
+
+```
+[host] boot APB0_BASE default = 0x00000000 (expect 0x00000000)   PASS
+[host] boot APB1_BASE default = 0x00000000 (expect 0x00000000)   PASS
+[host] boot APB0_BASE      = 0x000c0000 (expect 0x000c0000)      PASS
+[host] boot APB1_BASE      = 0x000d0000 (expect 0x000d0000)      PASS
+[host] boot APB base registers restored to 0 (fixed map)
+```
+
+验证覆盖：复位默认值、32 位全字写入回读、恢复默认值。随后将寄存器写回 0（保持固定映射）再释放 CPU 复位。
+
+### 11.3 回归结果
+
+| 检查项 | 结果 |
+|---|---|
+| APB0_BASE 默认值（0x00000000） | PASS |
+| APB1_BASE 默认值（0x00000000） | PASS |
+| APB0_BASE 写 0x000C0000 回读 | PASS |
+| APB1_BASE 写 0x000D0000 回读 | PASS |
+| 恢复默认后 RT-Thread 8/8 任务 | PASS |
+| `=== TEST RESULT: PASS (ctrl1=0x0000beef) ===` | PASS |
+| 全程 CPU trap | 0 |
+
+回归性能与阶段四一致（`total=9,340,283`、`irq_vec=3,530,240`、UART TX 974 字符），动态基地址译码不影响互连仲裁与事务延迟。
 
 ## 附录 A：固件完整运行日志
 

@@ -372,6 +372,21 @@ module soc_tb;
         axil_read(32'h00000000 + ((nwords-1) << 2), rd);
         $display("[host] ram[%0d] = 0x%08x", nwords-1, rd);
 
+        // verify boot_ctrl APB base registers: default 0, RW, restore to 0
+        axil_read(32'h00010008, rd);
+        $display("[host] boot APB0_BASE default = 0x%08x (expect 0x00000000)", rd);
+        axil_read(32'h0001000C, rd);
+        $display("[host] boot APB1_BASE default = 0x%08x (expect 0x00000000)", rd);
+        axil_write(32'h00010008, 32'h000C0000, 4'hF);
+        axil_read(32'h00010008, rd);
+        $display("[host] boot APB0_BASE      = 0x%08x (expect 0x000c0000)", rd);
+        axil_write(32'h0001000C, 32'h000D0000, 4'hF);
+        axil_read(32'h0001000C, rd);
+        $display("[host] boot APB1_BASE      = 0x%08x (expect 0x000d0000)", rd);
+        axil_write(32'h00010008, 32'h00000000, 4'hF);   // restore fixed map
+        axil_write(32'h0001000C, 32'h00000000, 4'hF);
+        $display("[host] boot APB base registers restored to 0 (fixed map)");
+
         // release CPU reset via boot_ctrl CTRL register
         axil_write(32'h00010000, 32'h00000001, 4'hF);   // boot_ctrl: release CPU reset
         $display("[host] cpu reset released (boot_ctrl=1)");
