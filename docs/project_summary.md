@@ -173,6 +173,7 @@
 ## 7. 附：git 提交历史
 
 ```
+1e8b3aa Move APB peripherals out of SoC; relocate base on APB address lines
 5a91d7a Add boot_ctrl APB0/APB1 base registers with dynamic interconnect base addressing
 0bc280f Compact AXI-Lite address map to 2MB (64KB per slave port) for coprocessor use
 22bb1b8 Add project docs: RT-Thread/interrupt-optimization test data and work summary
