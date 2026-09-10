@@ -3,8 +3,8 @@
 - **项目名称**：PicoRV32 SoC（RV32IM 轻量 SoC，AXI4-Lite 架构）
 - **开发方式**：通过 **TRAE Work** 远程向家中 7×24 运行的小主机提交任务，由 **DeepSeek V4 Flash 正式版** 完成全部 RTL / 固件 / 仿真代码与调试
 - **仿真平台**：Verilator 5.x（100 MHz，周期 10 ns）
-- **完成日期**：2026-08-30（阶段一~四）/ 2026-09-10（阶段五：APB 基地址动态重定位）
-- **最终状态**：8/8 RT-Thread 任务通过，`ctrl1=0x0000beef`（PASS），无 CPU trap；APB0/APB1 基地址可经 boot 寄存器动态重定位
+- **完成日期**：2026-08-30（阶段一~四）/ 2026-09-10（阶段五：APB 接口外置 + 地址线可重定位）
+- **最终状态**：8/8 RT-Thread 任务通过，`ctrl1=0x0000beef`（PASS），无 CPU trap；APB0/APB1 作为对外 APB master 接口引出（寄存器输出），基地址可经 boot 寄存器在地址线上叠加重定位
 
 ---
 
@@ -30,10 +30,10 @@
 | IRQ | `0x00020000` | `irq_ctrl` 中断控制器（16 源聚合） |
 | I2C0-3 | `0x00030000`~`0x00060000` | `i2c_master_axil` ×4 |
 | UART0-1 | `0x00070000`~`0x00080000` | `uart_axil` ×2 |
-| APB0 | `0x00090000` | GPIO + TIMER0（经 `axil2apb` 桥）；**基地址可重定位** |
-| APB1 | `0x000A0000` | CTRL + TIMER1（经 `axil2apb` 桥）；**基地址可重定位** |
+| APB0 | `0x00090000` | 对外 APB0 master（GPIO/TIMER0 由外部挂接）；**地址线可重定位** |
+| APB1 | `0x000A0000` | 对外 APB1 master（CTRL/TIMER1 由外部挂接）；**地址线可重定位** |
 
-阶段五起，APB0/APB1 的基地址可在运行时通过 `boot_ctrl` 的 `APB0_BASE`（0x08）/ `APB1_BASE`（0x0C）寄存器重定位：默认 **0** = 上表固定地址；写入非零 64KB 对齐值后，互联模块（`M_DYNAMIC_BASE`）按动态基地址译码（详见 4.5 阶段五）。
+阶段五起，APB0/APB1 不再在 SoC 内部挂接 APB 外设，而是作为**对外 APB master 接口**引出（全部输出为寄存器输出），GPIO/TIMER0/CTRL/TIMER1 移到 SoC 外由外部挂接，中断信号送回 `irq_ctrl` 聚合。`boot_ctrl` 的 `APB0_BASE`（0x08）/ `APB1_BASE`（0x0C）寄存器（默认 0）用于**地址线重定位**：axil2apb 桥输出 `apb_paddr = base + 64KB 窗口内偏移`（32 位地址线），互联译码保持固定不变（详见阶段五）。
 
 中断映射：`[0] UART0_RX [1] UART0_TX [2] UART1_RX [3] UART1_TX [4] TIMER0 [5] TIMER1 [6] GPIO`，聚合后送入 PicoRV32 `irq[5]`。
 
@@ -135,16 +135,18 @@
 
 **阶段四解决的关键问题**：首次回归 TIMEOUT（CPU 卡在 `poll_status` 死循环、零外设写）——定位为 `fw/Makefile` 的 `%.o: %.c` 规则不含头文件依赖，修改 `soc_addr.h` 后 `board.o` 等对象未重编，链接到旧地址固件；`make clean && make` 强制重建后恢复。建议后续为 Makefile 增加 `-MMD` 头文件依赖。
 
-### 阶段五：APB 基地址动态重定位（2026-09-10）
+### 阶段五：APB 接口外置与地址线重定位（2026-09-10）
 
-为便于外部主控在运行时避开与其他主设备的地址冲突，新增 APB0/APB1 从口基地址的动态重定位能力：
+为便于把 SoC 作为协处理器嵌入大型逻辑芯片，APB0/APB1 两个 APB 域外置：不再在 SoC 内部挂接 APB 外设，而是作为**对外 APB master 接口**直接引出；GPIO / TIMER0 / CTRL / TIMER1 等 APB 设备移到芯片侧挂接，其中断信号送回 SoC 的 `irq_ctrl` 聚合。同时，外部主控可在运行时通过 boot 寄存器把 APB 地址线上携带的基地址整体平移：
 
 - **`rtl/soc/boot_ctrl.v`**：新增两个 32 位读写寄存器 `APB0_BASE`（0x08）/ `APB1_BASE`（0x0C），复位默认 **0**，输出 `apb0_base` / `apb1_base`；
-- **`rtl/third_party/verilog-axi/rtl/axil_interconnect.v`**：扩展参数 `M_DYNAMIC_BASE`（位向量）与输入 `m_axil_base_addr`——对应位使能且输入非零时，该从口译码基地址改用输入值，否则用 `M_BASE_ADDR` 静态默认（向后兼容）；
-- **`rtl/soc/soc_top.v`**：`M_DYNAMIC_BASE=11'b11000000000` 仅使能从口 9/10，`m_axil_base_addr` 接 boot 寄存器输出；
-- **`fw/lib/soc_addr.h`**：新增 `BOOT_APB0_BASE` / `BOOT_APB1_BASE` 宏；
-- **`sim/soc_tb.v`**：固件下载后、释放复位前验证默认值（0）、全字写 0x000C0000/0x000D0000 回读、恢复 0；
-- **回归结果**：新寄存器 4 项验证全部 PASS，恢复固定映射后 8/8 任务 PASS、`ctrl1=0x0000beef`、无 CPU trap，性能与阶段四完全一致（`total=9,340,283`、UART TX 974 字符）。
+- **`rtl/soc/axil2apb.v`**：新增 `base_addr` 输入与 `APB_ADDR_WIDTH` 参数（设为 32）。AXI 侧地址为 64KB 窗口内偏移（16 位），桥捕获事务时输出 `apb_paddr = base_addr + 窗口内偏移`（去除 64KB 以上高位、保留偏移、叠加基地址），地址线扩展到 32 位；**全部 APB 输出（paddr / pwdata / pstrb / psel / penable / pwrite）寄存器化**，对外无组合路径；
+- **`rtl/soc/soc_top.v`**：删除内部 `apb_interconnect` 及 `apb_gpio` / `apb_timer` / `apb_ctrl` 例化，引出顶层 `apb0_*` / `apb1_*` 端口（32 位地址线），新增 `gpio_intr` / `timer0_irq` / `timer1_irq` 外部中断输入接入 `irq_ctrl`，两桥 `base_addr` 接 boot 寄存器输出；
+- **`rtl/third_party/verilog-axi/rtl/axil_interconnect.v`**：保持**静态译码不变**——回退此前为实现动态译码所做的 `M_DYNAMIC_BASE` 修改（从历史提交恢复），APB 窗口在互联中的位置固定（从口 9/10），重定位只体现在 APB 地址线上；
+- **`sim/soc_tb.v`**：原 SoC 内部 APB 外设移至测试台例化（`apb_interconnect` + `apb_gpio` / `apb_timer` / `apb_ctrl`），外设译码使用 `apb*_paddr[15:0]` 窗口内偏移，与基地址无关；
+- **`fw/lib/soc_addr.h`**：新增 `BOOT_APB0_BASE` / `BOOT_APB1_BASE` 宏。
+
+**验证结果**（`sim/sim_apb_ext.log`）：寄存器默认值（0）、全字写回读（0x000C0000 / 0x000D0000）、**APB 地址线输出三态验证**全部 PASS —— 基地址为 0 时仅输出窗口内偏移（`0x00001000`）；写入非零后输出 `base + 偏移`（`0x000C1000` / `0x000D1000`）；恢复默认后回到偏移输出。随后释放 CPU 复位，**8/8 RT-Thread 任务 PASS、`ctrl1=0x0000beef`、无 CPU trap**，回归性能与阶段四一致（`total=9,340,403` ≈ 9,340,283、`irq_vec=3,530,240`、UART TX 974 字符），外置 + 寄存器化不影响互联仲裁与事务延迟（APB 读写仍为 3 拍）。
 
 ## 5. 最终成果
 
@@ -166,7 +168,7 @@
 4. **仿真测试台是 Debug 利器**：trap 时打印 PC 历史、中断边沿计数、内存停等统计，能让问题从"玄学"变成可定位的工程问题。
 5. **隔离变量**：对比优化效果时，保证固件行为一致（如 UART 字符数），否则总周期对比会被污染（本项目中 d1 与 d2 的 974 字符一致，对比才有效）。
 6. **Makefile 必须有头文件依赖**：仅靠 `%.o: %.c` 编译，修改 `soc_addr.h` 这类被大量文件包含的头文件后，旧对象会带着旧值被链接，造成"改了地址但行为没变"的隐蔽故障。应使用 `-MMD -MP` 生成 `.d` 依赖（阶段四曾因此踩坑）。
-7. **第三方 IP 扩展要向后兼容**：给 `axil_interconnect` 增加动态基地址时，新参数默认值（`M_DYNAMIC_BASE=0`）与新增输入端口不改变原行为，使既有例化（含其他项目）无需改动即可升级；"默认 0 = 固定映射"的语义也让 SoC 上电行为与扩展前完全一致。
+7. **改动第三方 IP 要三思**：曾尝试给 `axil_interconnect` 增加 `M_DYNAMIC_BASE` 动态译码，经需求澄清后改为"互联保持静态译码、仅 APB 地址线叠加基地址"，最终从历史提交回退了互联模块的全部修改。对第三方基础设施的侵入式改动应尽量规避——能在外围模块（如桥）实现的特性就不要动互联；先确认需求再动手，避免返工。
 
 ## 7. 附：git 提交历史
 

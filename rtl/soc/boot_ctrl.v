@@ -6,8 +6,8 @@
 //   0x00  CTRL      (RW) bit0 = cpu_resetn  (1=release, 0=hold reset)
 //   0x04  STATUS    (RO) bit0 = cpu_resetn readback
 //                         bit1 = cpu_trap (PicoRV32 trap output)
-//   0x08  APB0_BASE (RW) APB0 window base address; 0 = fixed default 0x00090000
-//   0x0C  APB1_BASE (RW) APB1 window base address; 0 = fixed default 0x000A0000
+//   0x08  APB0_BASE (RW) base added to the APB0 address lines (0 = offset only)
+//   0x0C  APB1_BASE (RW) base added to the APB1 address lines (0 = offset only)
 module boot_ctrl #(
     parameter integer ADDR_WIDTH = 32,
     parameter integer DATA_WIDTH = 32

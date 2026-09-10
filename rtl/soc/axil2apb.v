@@ -4,10 +4,14 @@
 
 // axil2apb.v - AXI4-Lite slave to APB3 master bridge
 // One transaction at a time; supports independent AW/W or combined handshake.
+// The AXI address is a 64KB window offset (ADDR_WIDTH wide); the APB address
+// output is 32-bit and equals base_addr + window offset. All APB outputs are
+// registered (no combinational path to the APB pins).
 module axil2apb #(
     parameter integer ADDR_WIDTH = 16,
     parameter integer DATA_WIDTH = 32,
-    parameter integer STRB_WIDTH = DATA_WIDTH/8
+    parameter integer STRB_WIDTH = DATA_WIDTH/8,
+    parameter integer APB_ADDR_WIDTH = 32
 ) (
     input  wire clk,
     input  wire rst,
@@ -33,8 +37,8 @@ module axil2apb #(
     output wire                    s_axil_rvalid,
     input  wire                    s_axil_rready,
 
-    // APB master interface
-    output wire [ADDR_WIDTH-1:0]   apb_paddr,
+    // APB master interface (all registered outputs)
+    output wire [APB_ADDR_WIDTH-1:0] apb_paddr,
     output wire                    apb_psel,
     output wire                    apb_penable,
     output wire                    apb_pwrite,
@@ -42,7 +46,10 @@ module axil2apb #(
     output wire [STRB_WIDTH-1:0]   apb_pstrb,
     input  wire [DATA_WIDTH-1:0]   apb_prdata,
     input  wire                    apb_pready,
-    input  wire                    apb_pslverr
+    input  wire                    apb_pslverr,
+
+    // Base address added to the APB address output (window relocation)
+    input  wire [APB_ADDR_WIDTH-1:0] base_addr
 );
 
     localparam [1:0] IDLE = 2'd0, SETUP = 2'd1, ACCESS = 2'd2, RESP = 2'd3;
@@ -55,6 +62,12 @@ module axil2apb #(
     reg is_write;
     reg bvalid_reg, rvalid_reg;
 
+    reg [APB_ADDR_WIDTH-1:0] apb_paddr_reg;
+    reg [DATA_WIDTH-1:0]     apb_pwdata_reg;
+    reg [STRB_WIDTH-1:0]     apb_pstrb_reg;
+    reg apb_pwrite_reg;
+    reg apb_psel_reg, apb_penable_reg;
+
     assign s_axil_awready = (state == IDLE) && s_axil_awvalid && s_axil_wvalid;
     assign s_axil_wready  = (state == IDLE) && s_axil_awvalid && s_axil_wvalid;
     assign s_axil_arready = (state == IDLE) && !s_axil_awvalid;
@@ -64,20 +77,22 @@ module axil2apb #(
     assign s_axil_rvalid  = rvalid_reg;
     assign s_axil_rdata   = rdata_reg;
 
-    assign apb_paddr  = addr_reg;
-    assign apb_pwdata = wdata_reg;
-    assign apb_pstrb  = wstrb_reg;
-    assign apb_pwrite = is_write;
-
-    reg apb_psel_reg, apb_penable_reg;
-    assign apb_psel   = apb_psel_reg;
+    assign apb_paddr   = apb_paddr_reg;
+    assign apb_pwdata  = apb_pwdata_reg;
+    assign apb_pstrb   = apb_pstrb_reg;
+    assign apb_pwrite  = apb_pwrite_reg;
+    assign apb_psel    = apb_psel_reg;
     assign apb_penable = apb_penable_reg;
 
     always @(posedge clk) begin
         if (rst) begin
             state        <= IDLE;
-            apb_psel_reg <= 0;
-            apb_penable_reg <= 0;
+            apb_paddr_reg    <= 0;
+            apb_pwdata_reg   <= 0;
+            apb_pstrb_reg    <= 0;
+            apb_pwrite_reg   <= 0;
+            apb_psel_reg     <= 0;
+            apb_penable_reg  <= 0;
             bvalid_reg   <= 0;
             rvalid_reg   <= 0;
         end else begin
@@ -87,17 +102,23 @@ module axil2apb #(
                     if (bvalid_reg && s_axil_bready) bvalid_reg <= 0;
                     if (rvalid_reg && s_axil_rready) rvalid_reg <= 0;
                     if (s_axil_arvalid) begin
-                        addr_reg <= s_axil_araddr;
-                        is_write <= 0;
-                        apb_psel_reg <= 1;
-                        state    <= SETUP;
+                        addr_reg       <= s_axil_araddr;
+                        apb_paddr_reg  <= base_addr + s_axil_araddr;   // base + 64KB offset
+                        apb_pwrite_reg <= 0;
+                        is_write       <= 0;
+                        apb_psel_reg   <= 1;
+                        state          <= SETUP;
                     end else if (s_axil_awvalid && s_axil_wvalid) begin
-                        addr_reg  <= s_axil_awaddr;
-                        wdata_reg <= s_axil_wdata;
-                        wstrb_reg <= s_axil_wstrb;
-                        is_write  <= 1;
-                        apb_psel_reg <= 1;
-                        state     <= SETUP;
+                        addr_reg       <= s_axil_awaddr;
+                        wdata_reg      <= s_axil_wdata;
+                        wstrb_reg      <= s_axil_wstrb;
+                        apb_paddr_reg  <= base_addr + s_axil_awaddr;
+                        apb_pwdata_reg <= s_axil_wdata;
+                        apb_pstrb_reg  <= s_axil_wstrb;
+                        apb_pwrite_reg <= 1;
+                        is_write       <= 1;
+                        apb_psel_reg   <= 1;
+                        state          <= SETUP;
                     end
                 end
                 SETUP: begin

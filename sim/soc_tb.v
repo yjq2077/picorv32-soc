@@ -64,6 +64,22 @@ module soc_tb;
     wire [31:0] ctrl0, ctrl1, ctrl2;
     wire        irq_out;
 
+    // External APB0/APB1 master interfaces exported by the SoC
+    wire [31:0] apb0_paddr, apb1_paddr;
+    wire        apb0_psel, apb0_penable, apb0_pwrite;
+    wire [31:0] apb0_pwdata;
+    wire [ 3:0] apb0_pstrb;
+    wire [31:0] apb0_prdata;
+    wire        apb0_pready;
+    wire        apb0_pslverr;
+    wire        apb1_psel, apb1_penable, apb1_pwrite;
+    wire [31:0] apb1_pwdata;
+    wire [ 3:0] apb1_pstrb;
+    wire [31:0] apb1_prdata;
+    wire        apb1_pready;
+    wire        apb1_pslverr;
+    wire        gpio_intr, timer0_irq, timer1_irq;
+
     reg  [35:0] last_trace;
     reg  [31:0] last_pc;
     reg         ever_retired = 0;
@@ -255,13 +271,175 @@ module soc_tb;
         .i2c2_sda      (i2c2_sda),
         .i2c3_scl      (i2c3_scl),
         .i2c3_sda      (i2c3_sda),
-        .gpio_in       (gpio_in),
-        .gpio_out      (gpio_out),
-        .gpio_oe       (gpio_oe),
-        .ctrl0         (ctrl0),
-        .ctrl1         (ctrl1),
-        .ctrl2         (ctrl2),
+        .apb0_paddr    (apb0_paddr),
+        .apb0_psel     (apb0_psel),
+        .apb0_penable  (apb0_penable),
+        .apb0_pwrite   (apb0_pwrite),
+        .apb0_pwdata   (apb0_pwdata),
+        .apb0_pstrb    (apb0_pstrb),
+        .apb0_prdata   (apb0_prdata),
+        .apb0_pready   (apb0_pready),
+        .apb0_pslverr  (apb0_pslverr),
+        .apb1_paddr    (apb1_paddr),
+        .apb1_psel     (apb1_psel),
+        .apb1_penable  (apb1_penable),
+        .apb1_pwrite   (apb1_pwrite),
+        .apb1_pwdata   (apb1_pwdata),
+        .apb1_pstrb    (apb1_pstrb),
+        .apb1_prdata   (apb1_prdata),
+        .apb1_pready   (apb1_pready),
+        .apb1_pslverr  (apb1_pslverr),
+        .gpio_intr     (gpio_intr),
+        .timer0_irq    (timer0_irq),
+        .timer1_irq    (timer1_irq),
         .irq_out       (irq_out)
+    );
+
+    // ------------------------------------------------------------------
+    // External APB devices on APB0: GPIO + TIMER0 (live outside the SoC)
+    // ------------------------------------------------------------------
+    wire        apb0_s0_psel, apb0_s1_psel;
+    wire [31:0] apb0_s0_prdata, apb0_s1_prdata;
+    wire        apb0_s0_pready, apb0_s1_pready;
+    wire        apb0_s0_pslverr, apb0_s1_pslverr;
+
+    apb_interconnect #(
+        .ADDR_WIDTH   (16),
+        .DATA_WIDTH   (32),
+        .S_COUNT      (2),
+        .S_BASE_ADDR  ({16'h1000, 16'h0000}),   // S0=GPIO@0x0000, S1=TIMER0@0x1000
+        .S_ADDR_WIDTH ({32'd12, 32'd12})
+    ) u_apb0_ic (
+        .clk         (clk),
+        .rst         (~rst_n),
+        .apb_paddr   (apb0_paddr[15:0]),   // decode uses the window offset only
+        .apb_psel    (apb0_psel),
+        .apb_penable (apb0_penable),
+        .apb_pwrite  (apb0_pwrite),
+        .apb_pwdata  (apb0_pwdata),
+        .apb_pstrb   (apb0_pstrb),
+        .apb_prdata  (apb0_prdata),
+        .apb_pready  (apb0_pready),
+        .apb_pslverr (apb0_pslverr),
+        .s_psel      ({apb0_s1_psel, apb0_s0_psel}),
+        .s_paddr     (),
+        .s_penable   (),
+        .s_pwrite    (),
+        .s_pwdata    (),
+        .s_pstrb     (),
+        .s_prdata    ({apb0_s1_prdata, apb0_s0_prdata}),
+        .s_pready    ({apb0_s1_pready, apb0_s0_pready}),
+        .s_pslverr   ({apb0_s1_pslverr, apb0_s0_pslverr})
+    );
+
+    apb_gpio #(
+        .DATA_WIDTH (32)
+    ) u_gpio (
+        .clk       (clk),
+        .rst       (~rst_n),
+        .psel      (apb0_s0_psel),
+        .penable   (apb0_penable),
+        .paddr     (apb0_paddr[11:0]),
+        .pwrite    (apb0_pwrite),
+        .pwdata    (apb0_pwdata),
+        .pstrb     (apb0_pstrb),
+        .prdata    (apb0_s0_prdata),
+        .pready    (apb0_s0_pready),
+        .pslverr   (apb0_s0_pslverr),
+        .gpio_out  (gpio_out),
+        .gpio_oe   (gpio_oe),
+        .gpio_in   (gpio_in),
+        .gpio_intr (gpio_intr)
+    );
+
+    apb_timer #(
+        .DATA_WIDTH (32)
+    ) u_timer0 (
+        .clk       (clk),
+        .rst       (~rst_n),
+        .psel      (apb0_s1_psel),
+        .penable   (apb0_penable),
+        .paddr     (apb0_paddr[11:0]),
+        .pwrite    (apb0_pwrite),
+        .pwdata    (apb0_pwdata),
+        .pstrb     (apb0_pstrb),
+        .prdata    (apb0_s1_prdata),
+        .pready    (apb0_s1_pready),
+        .pslverr   (apb0_s1_pslverr),
+        .timer_irq (timer0_irq)
+    );
+
+    // ------------------------------------------------------------------
+    // External APB devices on APB1: CTRL + TIMER1 (live outside the SoC)
+    // ------------------------------------------------------------------
+    wire        apb1_s0_psel, apb1_s1_psel;
+    wire [31:0] apb1_s0_prdata, apb1_s1_prdata;
+    wire        apb1_s0_pready, apb1_s1_pready;
+    wire        apb1_s0_pslverr, apb1_s1_pslverr;
+
+    apb_interconnect #(
+        .ADDR_WIDTH   (16),
+        .DATA_WIDTH   (32),
+        .S_COUNT      (2),
+        .S_BASE_ADDR  ({16'h1000, 16'h0000}),   // S0=CTRL@0x0000, S1=TIMER1@0x1000
+        .S_ADDR_WIDTH ({32'd12, 32'd12})
+    ) u_apb1_ic (
+        .clk         (clk),
+        .rst         (~rst_n),
+        .apb_paddr   (apb1_paddr[15:0]),   // decode uses the window offset only
+        .apb_psel    (apb1_psel),
+        .apb_penable (apb1_penable),
+        .apb_pwrite  (apb1_pwrite),
+        .apb_pwdata  (apb1_pwdata),
+        .apb_pstrb   (apb1_pstrb),
+        .apb_prdata  (apb1_prdata),
+        .apb_pready  (apb1_pready),
+        .apb_pslverr (apb1_pslverr),
+        .s_psel      ({apb1_s1_psel, apb1_s0_psel}),
+        .s_paddr     (),
+        .s_penable   (),
+        .s_pwrite    (),
+        .s_pwdata    (),
+        .s_pstrb     (),
+        .s_prdata    ({apb1_s1_prdata, apb1_s0_prdata}),
+        .s_pready    ({apb1_s1_pready, apb1_s0_pready}),
+        .s_pslverr   ({apb1_s1_pslverr, apb1_s0_pslverr})
+    );
+
+    apb_ctrl #(
+        .DATA_WIDTH (32)
+    ) u_ctrl (
+        .clk       (clk),
+        .rst       (~rst_n),
+        .psel      (apb1_s0_psel),
+        .penable   (apb1_penable),
+        .paddr     (apb1_paddr[11:0]),
+        .pwrite    (apb1_pwrite),
+        .pwdata    (apb1_pwdata),
+        .pstrb     (apb1_pstrb),
+        .prdata    (apb1_s0_prdata),
+        .pready    (apb1_s0_pready),
+        .pslverr   (apb1_s0_pslverr),
+        .ctrl0     (ctrl0),
+        .ctrl1     (ctrl1),
+        .ctrl2     (ctrl2)
+    );
+
+    apb_timer #(
+        .DATA_WIDTH (32)
+    ) u_timer1 (
+        .clk       (clk),
+        .rst       (~rst_n),
+        .psel      (apb1_s1_psel),
+        .penable   (apb1_penable),
+        .paddr     (apb1_paddr[11:0]),
+        .pwrite    (apb1_pwrite),
+        .pwdata    (apb1_pwdata),
+        .pstrb     (apb1_pstrb),
+        .prdata    (apb1_s1_prdata),
+        .pready    (apb1_s1_pready),
+        .pslverr   (apb1_s1_pslverr),
+        .timer_irq (timer1_irq)
     );
 
     // I2C pullups (open-drain buses)
@@ -372,19 +550,32 @@ module soc_tb;
         axil_read(32'h00000000 + ((nwords-1) << 2), rd);
         $display("[host] ram[%0d] = 0x%08x", nwords-1, rd);
 
-        // verify boot_ctrl APB base registers: default 0, RW, restore to 0
+        // verify boot_ctrl APB base registers + APB address-line relocation
         axil_read(32'h00010008, rd);
         $display("[host] boot APB0_BASE default = 0x%08x (expect 0x00000000)", rd);
         axil_read(32'h0001000C, rd);
         $display("[host] boot APB1_BASE default = 0x%08x (expect 0x00000000)", rd);
+        // APB0 addr line with base = 0 (fixed): read TIMER0 at 0x00090000+0x1000
+        axil_read(32'h00091000, rd);
+        $display("[host] APB0 paddr base=0        = 0x%08x (offset only, expect 0x00001000)", apb0_paddr);
+
         axil_write(32'h00010008, 32'h000C0000, 4'hF);
         axil_read(32'h00010008, rd);
         $display("[host] boot APB0_BASE      = 0x%08x (expect 0x000c0000)", rd);
+        // same AXI address, but the APB address line now carries base+offset
+        axil_read(32'h00091000, rd);
+        $display("[host] APB0 paddr base=C0000   = 0x%08x (expect 0x000c1000)", apb0_paddr);
+
         axil_write(32'h0001000C, 32'h000D0000, 4'hF);
         axil_read(32'h0001000C, rd);
         $display("[host] boot APB1_BASE      = 0x%08x (expect 0x000d0000)", rd);
+        axil_read(32'h000A1000, rd);
+        $display("[host] APB1 paddr base=D0000   = 0x%08x (expect 0x000d1000)", apb1_paddr);
+
         axil_write(32'h00010008, 32'h00000000, 4'hF);   // restore fixed map
         axil_write(32'h0001000C, 32'h00000000, 4'hF);
+        axil_read(32'h00091000, rd);
+        $display("[host] APB0 paddr restored     = 0x%08x (offset only, expect 0x00001000)", apb0_paddr);
         $display("[host] boot APB base registers restored to 0 (fixed map)");
 
         // release CPU reset via boot_ctrl CTRL register

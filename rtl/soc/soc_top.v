@@ -18,11 +18,14 @@
 //   6: 0x00060000  I2C3
 //   7: 0x00070000  UART0
 //   8: 0x00080000  UART1
-//   9: 0x00090000  APB0       (GPIO @ +0x0000, TIMER0 @ +0x1000)
-//  10: 0x000A0000  APB1       (CTRL @ +0x0000, TIMER1 @ +0x1000)
+//   9: 0x00090000  APB0       (APB master out; external devices e.g. GPIO/TIMER0)
+//  10: 0x000A0000  APB1       (APB master out; external devices e.g. CTRL/TIMER1)
 //
-// APB0/APB1 windows are relocatable: boot_ctrl APB0_BASE / APB1_BASE
-// registers (default 0) override the fixed bases above when non-zero.
+// AXI-Lite decode is fixed (map above); the APB0/APB1 master interfaces are
+// exported to the top level (registered outputs). boot_ctrl APB0_BASE /
+// APB1_BASE registers (default 0) relocate the address carried on the APB
+// address lines: apb_paddr = base + 64KB window offset. External APB devices
+// and their interrupts (gpio_intr/timer0_irq/timer1_irq) live outside the SoC.
 //
 // Interrupt mapping (irq_ctrl inputs):
 //   [0] uart0_rx  [1] uart0_tx  [2] uart1_rx  [3] uart1_tx
@@ -73,15 +76,32 @@ module soc_top #(
     inout  wire                    i2c2_scl, i2c2_sda,
     inout  wire                    i2c3_scl, i2c3_sda,
 
-    // GPIO
-    input  wire [15:0]             gpio_in,
-    output wire [15:0]             gpio_out,
-    output wire [15:0]             gpio_oe,
+    // APB0 master interface (to external APB devices, e.g. GPIO/TIMER0)
+    output wire [31:0]             apb0_paddr,
+    output wire                    apb0_psel,
+    output wire                    apb0_penable,
+    output wire                    apb0_pwrite,
+    output wire [31:0]             apb0_pwdata,
+    output wire [ 3:0]             apb0_pstrb,
+    input  wire [31:0]             apb0_prdata,
+    input  wire                    apb0_pready,
+    input  wire                    apb0_pslverr,
 
-    // APB1 control outputs
-    output wire [31:0]             ctrl0,
-    output wire [31:0]             ctrl1,
-    output wire [31:0]             ctrl2,
+    // APB1 master interface (to external APB devices, e.g. CTRL/TIMER1)
+    output wire [31:0]             apb1_paddr,
+    output wire                    apb1_psel,
+    output wire                    apb1_penable,
+    output wire                    apb1_pwrite,
+    output wire [31:0]             apb1_pwdata,
+    output wire [ 3:0]             apb1_pstrb,
+    input  wire [31:0]             apb1_prdata,
+    input  wire                    apb1_pready,
+    input  wire                    apb1_pslverr,
+
+    // External peripheral interrupts (GPIO, TIMER0/1 live outside the SoC)
+    input  wire                    gpio_intr,
+    input  wire                    timer0_irq,
+    input  wire                    timer1_irq,
 
     // Interrupt debug
     output wire                    irq_out
@@ -191,8 +211,8 @@ module soc_top #(
     wire [ADDR_WIDTH-1:0] boot_araddr;  wire [ 2:0] boot_arprot;  wire boot_arvalid;  wire boot_arready;
     wire [DATA_WIDTH-1:0] boot_rdata;   wire [ 1:0] boot_rresp;   wire boot_rvalid;   wire boot_rready;
 
-    wire [DATA_WIDTH-1:0] boot_apb0_base;   // APB0 window base (0 = fixed default)
-    wire [DATA_WIDTH-1:0] boot_apb1_base;   // APB1 window base (0 = fixed default)
+    wire [DATA_WIDTH-1:0] boot_apb0_base;   // APB0 base added to APB addr lines (0 = offset only)
+    wire [DATA_WIDTH-1:0] boot_apb1_base;   // APB1 base added to APB addr lines (0 = offset only)
 
     wire [ADDR_WIDTH-1:0] irq_awaddr;   wire [ 2:0] irq_awprot;   wire irq_awvalid;   wire irq_awready;
     wire [DATA_WIDTH-1:0] irq_wdata;    wire [STRB_WIDTH-1:0] irq_wstrb; wire irq_wvalid; wire irq_wready;
@@ -263,10 +283,7 @@ module soc_top #(
                           32'h00060000, 32'h00050000, 32'h00040000, 32'h00030000,
                           32'h00020000, 32'h00010000, 32'h00000000}),
         .M_ADDR_WIDTH   ({32'd16, 32'd16, 32'd16, 32'd16, 32'd16, 32'd16,
-                          32'd16, 32'd16, 32'd16, 32'd16, 32'd16}),
-        // ports 9 (APB0) and 10 (APB1) take their base address from the
-        // boot_ctrl APB0_BASE / APB1_BASE registers (0 = fixed map above)
-        .M_DYNAMIC_BASE (11'b11000000000)
+                          32'd16, 32'd16, 32'd16, 32'd16, 32'd16})
     ) u_ic (
         .clk            (clk),
         .rst            (rst),
@@ -350,9 +367,7 @@ module soc_top #(
                           irq_rvalid, boot_rvalid, ram_rvalid}),
         .m_axil_rready  ({apb1_rready, apb0_rready, uart1_rready, uart0_rready,
                           i2c3_rready, i2c2_rready, i2c1_rready, i2c0_rready,
-                          irq_rready, boot_rready, ram_rready}),
-        // dynamic bases: port 10=APB1, port 9=APB0, others unused (0)
-        .m_axil_base_addr ({boot_apb1_base, boot_apb0_base, 9*{32'd0}})
+                          irq_rready, boot_rready, ram_rready})
     );
 
     // ------------------------------------------------------------------
@@ -714,23 +729,13 @@ module soc_top #(
     );
 
     // ------------------------------------------------------------------
-    // Slave 9: APB0 (GPIO + TIMER0)
+    // Slave 9: APB0 master interface (external APB devices, e.g. GPIO/TIMER0)
     // ------------------------------------------------------------------
-    wire        apb0_psel, apb0_penable, apb0_pwrite;
-    wire [15:0] apb0_paddr;
-    wire [DATA_WIDTH-1:0] apb0_pwdata;
-    wire [STRB_WIDTH-1:0] apb0_pstrb;
-    wire [DATA_WIDTH-1:0] apb0_prdata;
-    wire        apb0_pready;
-    wire        apb0_pslverr;
-
-    wire gpio_intr;
-    wire timer0_irq;
-
     axil2apb #(
-        .ADDR_WIDTH (16),
-        .DATA_WIDTH (DATA_WIDTH),
-        .STRB_WIDTH (STRB_WIDTH)
+        .ADDR_WIDTH     (16),
+        .DATA_WIDTH     (DATA_WIDTH),
+        .STRB_WIDTH     (STRB_WIDTH),
+        .APB_ADDR_WIDTH (32)
     ) u_apb0_bridge (
         .clk         (clk),
         .rst         (rst),
@@ -761,97 +766,18 @@ module soc_top #(
         .apb_pstrb   (apb0_pstrb),
         .apb_prdata  (apb0_prdata),
         .apb_pready  (apb0_pready),
-        .apb_pslverr (apb0_pslverr)
-    );
-
-    wire        apb0_s0_psel, apb0_s1_psel;
-    wire [DATA_WIDTH-1:0] apb0_s0_prdata, apb0_s1_prdata;
-    wire        apb0_s0_pready, apb0_s1_pready;
-    wire        apb0_s0_pslverr, apb0_s1_pslverr;
-
-    apb_interconnect #(
-        .ADDR_WIDTH   (16),
-        .DATA_WIDTH   (DATA_WIDTH),
-        .S_COUNT      (2),
-        .S_BASE_ADDR  ({16'h1000, 16'h0000}),   // S0=GPIO@0x0000, S1=TIMER0@0x1000
-        .S_ADDR_WIDTH ({32'd12, 32'd12})
-    ) u_apb0_ic (
-        .clk         (clk),
-        .rst         (rst),
-        .apb_paddr   (apb0_paddr),
-        .apb_psel    (apb0_psel),
-        .apb_penable (apb0_penable),
-        .apb_pwrite  (apb0_pwrite),
-        .apb_pwdata  (apb0_pwdata),
-        .apb_pstrb   (apb0_pstrb),
-        .apb_prdata  (apb0_prdata),
-        .apb_pready  (apb0_pready),
         .apb_pslverr (apb0_pslverr),
-        .s_psel      ({apb0_s1_psel, apb0_s0_psel}),
-        .s_paddr     (),
-        .s_penable   (),
-        .s_pwrite    (),
-        .s_pwdata    (),
-        .s_pstrb     (),
-        .s_prdata    ({apb0_s1_prdata, apb0_s0_prdata}),
-        .s_pready    ({apb0_s1_pready, apb0_s0_pready}),
-        .s_pslverr   ({apb0_s1_pslverr, apb0_s0_pslverr})
-    );
-
-    apb_gpio #(
-        .DATA_WIDTH (DATA_WIDTH)
-    ) u_gpio (
-        .clk       (clk),
-        .rst       (rst),
-        .psel      (apb0_s0_psel),
-        .penable   (apb0_penable),
-        .paddr     (apb0_paddr[11:0]),
-        .pwrite    (apb0_pwrite),
-        .pwdata    (apb0_pwdata),
-        .pstrb     (apb0_pstrb),
-        .prdata    (apb0_s0_prdata),
-        .pready    (apb0_s0_pready),
-        .pslverr   (apb0_s0_pslverr),
-        .gpio_out  (gpio_out),
-        .gpio_oe   (gpio_oe),
-        .gpio_in   (gpio_in),
-        .gpio_intr (gpio_intr)
-    );
-
-    apb_timer #(
-        .DATA_WIDTH (DATA_WIDTH)
-    ) u_timer0 (
-        .clk       (clk),
-        .rst       (rst),
-        .psel      (apb0_s1_psel),
-        .penable   (apb0_penable),
-        .paddr     (apb0_paddr[11:0]),
-        .pwrite    (apb0_pwrite),
-        .pwdata    (apb0_pwdata),
-        .pstrb     (apb0_pstrb),
-        .prdata    (apb0_s1_prdata),
-        .pready    (apb0_s1_pready),
-        .pslverr   (apb0_s1_pslverr),
-        .timer_irq (timer0_irq)
+        .base_addr   (boot_apb0_base)
     );
 
     // ------------------------------------------------------------------
-    // Slave 10: APB1 (CTRL + TIMER1)
+    // Slave 10: APB1 master interface (external APB devices, e.g. CTRL/TIMER1)
     // ------------------------------------------------------------------
-    wire        apb1_psel, apb1_penable, apb1_pwrite;
-    wire [15:0] apb1_paddr;
-    wire [DATA_WIDTH-1:0] apb1_pwdata;
-    wire [STRB_WIDTH-1:0] apb1_pstrb;
-    wire [DATA_WIDTH-1:0] apb1_prdata;
-    wire        apb1_pready;
-    wire        apb1_pslverr;
-
-    wire timer1_irq;
-
     axil2apb #(
-        .ADDR_WIDTH (16),
-        .DATA_WIDTH (DATA_WIDTH),
-        .STRB_WIDTH (STRB_WIDTH)
+        .ADDR_WIDTH     (16),
+        .DATA_WIDTH     (DATA_WIDTH),
+        .STRB_WIDTH     (STRB_WIDTH),
+        .APB_ADDR_WIDTH (32)
     ) u_apb1_bridge (
         .clk         (clk),
         .rst         (rst),
@@ -882,77 +808,8 @@ module soc_top #(
         .apb_pstrb   (apb1_pstrb),
         .apb_prdata  (apb1_prdata),
         .apb_pready  (apb1_pready),
-        .apb_pslverr (apb1_pslverr)
-    );
-
-    wire        apb1_s0_psel, apb1_s1_psel;
-    wire [DATA_WIDTH-1:0] apb1_s0_prdata, apb1_s1_prdata;
-    wire        apb1_s0_pready, apb1_s1_pready;
-    wire        apb1_s0_pslverr, apb1_s1_pslverr;
-
-    apb_interconnect #(
-        .ADDR_WIDTH   (16),
-        .DATA_WIDTH   (DATA_WIDTH),
-        .S_COUNT      (2),
-        .S_BASE_ADDR  ({16'h1000, 16'h0000}),   // S0=CTRL@0x0000, S1=TIMER1@0x1000
-        .S_ADDR_WIDTH ({32'd12, 32'd12})
-    ) u_apb1_ic (
-        .clk         (clk),
-        .rst         (rst),
-        .apb_paddr   (apb1_paddr),
-        .apb_psel    (apb1_psel),
-        .apb_penable (apb1_penable),
-        .apb_pwrite  (apb1_pwrite),
-        .apb_pwdata  (apb1_pwdata),
-        .apb_pstrb   (apb1_pstrb),
-        .apb_prdata  (apb1_prdata),
-        .apb_pready  (apb1_pready),
         .apb_pslverr (apb1_pslverr),
-        .s_psel      ({apb1_s1_psel, apb1_s0_psel}),
-        .s_paddr     (),
-        .s_penable   (),
-        .s_pwrite    (),
-        .s_pwdata    (),
-        .s_pstrb     (),
-        .s_prdata    ({apb1_s1_prdata, apb1_s0_prdata}),
-        .s_pready    ({apb1_s1_pready, apb1_s0_pready}),
-        .s_pslverr   ({apb1_s1_pslverr, apb1_s0_pslverr})
-    );
-
-    apb_ctrl #(
-        .DATA_WIDTH (DATA_WIDTH)
-    ) u_ctrl (
-        .clk       (clk),
-        .rst       (rst),
-        .psel      (apb1_s0_psel),
-        .penable   (apb1_penable),
-        .paddr     (apb1_paddr[11:0]),
-        .pwrite    (apb1_pwrite),
-        .pwdata    (apb1_pwdata),
-        .pstrb     (apb1_pstrb),
-        .prdata    (apb1_s0_prdata),
-        .pready    (apb1_s0_pready),
-        .pslverr   (apb1_s0_pslverr),
-        .ctrl0     (ctrl0),
-        .ctrl1     (ctrl1),
-        .ctrl2     (ctrl2)
-    );
-
-    apb_timer #(
-        .DATA_WIDTH (DATA_WIDTH)
-    ) u_timer1 (
-        .clk       (clk),
-        .rst       (rst),
-        .psel      (apb1_s1_psel),
-        .penable   (apb1_penable),
-        .paddr     (apb1_paddr[11:0]),
-        .pwrite    (apb1_pwrite),
-        .pwdata    (apb1_pwdata),
-        .pstrb     (apb1_pstrb),
-        .prdata    (apb1_s1_prdata),
-        .pready    (apb1_s1_pready),
-        .pslverr   (apb1_s1_pslverr),
-        .timer_irq (timer1_irq)
+        .base_addr   (boot_apb1_base)
     );
 
 endmodule
